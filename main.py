@@ -877,7 +877,7 @@ async def chat_completions(request: Request):
     # ---------- 检测是否应跳过对话存储 ----------
     # 方式1: 客户端通过header显式声明
     skip_conversation_log = request.headers.get("X-Skip-Conversation-Log", "").lower() == "true"
-    
+    skip_conversation_log = False
     # 方式2: 自动检测标题生成等辅助请求
     if not skip_conversation_log:
         for msg in messages:
