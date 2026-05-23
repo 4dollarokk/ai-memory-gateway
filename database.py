@@ -35,6 +35,27 @@ WEIGHT_KEYWORD = float(os.getenv("WEIGHT_KEYWORD", "0.5"))
 WEIGHT_IMPORTANCE = float(os.getenv("WEIGHT_IMPORTANCE", "0.3"))
 WEIGHT_RECENCY = float(os.getenv("WEIGHT_RECENCY", "0.2"))
 MIN_SCORE_THRESHOLD = float(os.getenv("MIN_SCORE_THRESHOLD", "0.15"))
+# 七层记忆架构系数
+LAYER_BONUS = {
+    1: 1.0,    # 碎片
+    2: 1.1,    # 事件
+    3: 1.15,   # 技术
+    4: 1.25,   # 情感
+    5: 1.3,    # 人物
+    6: 1.4,    # 习惯
+    7: 1.5,    # 核心
+}
+
+# 各层时间衰减速度（天）
+LAYER_DECAY_DAYS = {
+    1: 30,     # 碎片
+    2: 60,     # 事件
+    3: 90,     # 技术
+    4: 180,    # 情感（不自动遗忘）
+    5: 180,    # 人物（不自动遗忘）
+    6: 365,    # 习惯（不自动遗忘）
+    7: 99999,  # 核心（几乎不衰减）
+}
 
 # 记忆混合搜索权重（MEMORY_VECTOR_ENABLED=true 时生效）
 MEMORY_HW_KEYWORD = float(os.getenv("MEMORY_HW_KEYWORD", "0.35"))
@@ -205,6 +226,34 @@ async def init_tables():
                     ALTER TABLE memories ADD COLUMN event_date DATE DEFAULT NULL;
                 END IF;
             END $$;
+        """)
+        # hits: 检索命中次数
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'hits'
+                ) THEN
+                    ALTER TABLE memories ADD COLUMN hits INTEGER DEFAULT 0;
+                END IF;
+            END $$;
+        """)
+
+        # emotional_intensity: 情感强度 1-5
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'emotional_intensity'
+                ) THEN
+                    ALTER TABLE memories ADD COLUMN emotional_intensity INTEGER DEFAULT 1;
+                END IF;
+            END $$;
+        """)
+
+        # hits 索引
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_hits ON memories (hits);
         """)
         
         # 三层记忆索引
@@ -588,12 +637,13 @@ async def update_message_content(message_id: int, new_content: str):
 # 记忆操作
 # ============================================================
 
-async def save_memory(content: str, importance: int = 5, source_session: str = ""):
+async def save_memory(content: str, importance: int = 5, source_session: str = "",
+                      layer: int = 1, emotional_intensity: int = 1):
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO memories (content, importance, source_session) VALUES ($1, $2, $3) RETURNING id",
-            content, importance, source_session,
+            "INSERT INTO memories (content, importance, source_session, layer, emotional_intensity) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+            content, importance, source_session, layer, emotional_intensity,
         )
         
         # MEMORY_VECTOR_ENABLED 时自动计算 embedding
@@ -604,7 +654,6 @@ async def save_memory(content: str, importance: int = 5, source_session: str = "
                     await save_memory_embedding(conn, row['id'], embedding)
             except Exception as e:
                 print(f"⚠️ 记忆 {row['id']} embedding自动计算失败: {e}")
-
 
 async def search_memories(query: str, limit: int = 10):
     """
@@ -640,7 +689,6 @@ async def search_memories(query: str, limit: int = 10):
         
         limit_idx = len(keywords) + 1
         params.append(limit)
-        
         sql = f"""
             SELECT 
                 id, content, importance, created_at,
@@ -649,7 +697,16 @@ async def search_memories(query: str, limit: int = 10):
                     {WEIGHT_KEYWORD} * ({hit_count_expr})::float / {max_hits}.0 +
                     {WEIGHT_IMPORTANCE} * importance::float / 10.0 +
                     {WEIGHT_RECENCY} * (1.0 / (1.0 + EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400.0))
-                ) AS score
+                ) * (1.0 + (COALESCE(emotional_intensity, 1) - 1) * 0.1)
+                * CASE COALESCE(layer, 1)
+                    WHEN 7 THEN 1.5
+                    WHEN 6 THEN 1.4
+                    WHEN 5 THEN 1.3
+                    WHEN 4 THEN 1.25
+                    WHEN 3 THEN 1.15
+                    WHEN 2 THEN 1.1
+                    ELSE 1.0
+                END AS score
             FROM memories
             WHERE {where_clause}
             ORDER BY score DESC, importance DESC, created_at DESC
@@ -673,7 +730,7 @@ async def search_memories(query: str, limit: int = 10):
             
             ids = [r["id"] for r in results]
             await conn.execute(
-                "UPDATE memories SET last_accessed = NOW() WHERE id = ANY($1::int[])",
+                "UPDATE memories SET last_accessed = NOW(), hits = hits + 1 WHERE id = ANY($1::int[])",
                 ids,
             )
         else:
@@ -716,8 +773,8 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             limit_idx = len(keywords) + 1
             params.append(limit * 3)
             
-            kw_sql = f"""
-                SELECT id, content, importance, created_at,
+           kw_sql = f"""
+                SELECT id, content, importance, created_at, layer, emotional_intensity,
                        ({hit_count_expr}) AS hit_count,
                        ({hit_count_expr})::float / {max_hits}.0 AS kw_score
                 FROM memories
@@ -727,7 +784,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             """
             kw_rows = await conn.fetch(kw_sql, *params)
             
-            for r in kw_rows:
+           for r in kw_rows:
                 candidates[r['id']] = {
                     'content': r['content'],
                     'importance': r['importance'],
@@ -735,6 +792,8 @@ async def search_memories_hybrid(query: str, limit: int = 10):
                     'hit_count': r['hit_count'],
                     'kw_score': float(r['kw_score']),
                     'similarity': 0.0,
+                    'layer': r.get('layer', 1) or 1,
+                    'emotional_intensity': r.get('emotional_intensity', 1) or 1,
                 }
         
         # ---- 向量路 ----
@@ -742,7 +801,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             if HAS_PGVECTOR:
                 vec_str = '[' + ','.join(str(f) for f in query_embedding) + ']'
                 sem_rows = await conn.fetch("""
-                    SELECT id, content, importance, created_at,
+                    SELECT id, content, importance, created_at, layer, emotional_intensity,
                            1 - (embedding <=> $1::vector) as similarity
                     FROM memories
                     WHERE embedding IS NOT NULL AND is_active = TRUE
@@ -752,8 +811,8 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             else:
                 # Python端计算cosine
                 import json
-                all_mem = await conn.fetch("""
-                    SELECT id, content, importance, created_at, embedding_json
+               all_mem = await conn.fetch("""
+                    SELECT id, content, importance, created_at, layer, emotional_intensity, embedding_json
                     FROM memories WHERE embedding_json IS NOT NULL AND is_active = TRUE
                 """)
                 
@@ -783,6 +842,8 @@ async def search_memories_hybrid(query: str, limit: int = 10):
                         'hit_count': 0,
                         'kw_score': 0.0,
                         'similarity': sim,
+                        'layer': r.get('layer', 1) or 1,
+                        'emotional_intensity': r.get('emotional_intensity', 1) or 1,
                     }
             
             # debug：向量路统计
@@ -811,10 +872,15 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             days = (now - info['created_at']).total_seconds() / 86400.0
             rec = 1.0 / (1.0 + days)
             
+           layer = info.get('layer', 1) or 1
+            ei = info.get('emotional_intensity', 1) or 1
+            layer_bonus = LAYER_BONUS.get(layer, 1.0)
+            ei_bonus = 1.0 + (ei - 1) * 0.1
+
             score = (MEMORY_HW_KEYWORD * kw +
                      MEMORY_HW_SEMANTIC * sem +
                      MEMORY_HW_IMPORTANCE * imp +
-                     MEMORY_HW_RECENCY * rec)
+                     MEMORY_HW_RECENCY * rec) * layer_bonus * ei_bonus
             
             final.append({
                 'id': mid,
@@ -847,7 +913,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             
             ids = [r["id"] for r in results]
             await conn.execute(
-                "UPDATE memories SET last_accessed = NOW() WHERE id = ANY($1::int[])",
+                "UPDATE memories SET last_accessed = NOW(), hits = hits + 1 WHERE id = ANY($1::int[])",
                 ids,
             )
         else:
@@ -1799,3 +1865,27 @@ async def revert_merge(memory_id: int):
         """, memory_id)
         
         return {"status": "ok", "restored": restored}
+
+async def apply_decay_forgetting():
+    """衰减遗忘：对 layer ≤ 3 的记忆，如果衰减后得分低于阈值，标记为不活跃。
+    
+    使用 last_accessed（如果为空则用 created_at）计算时间差。
+    layer 4-7 不参与自动遗忘。
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        for layer in [1, 2, 3]:
+            decay_days = LAYER_DECAY_DAYS[layer]
+            result = await conn.execute("""
+                UPDATE memories
+                SET is_active = FALSE
+                WHERE layer = $1
+                  AND is_active = TRUE
+                  AND (importance::float / 10.0 * (hits + 1) * EXP(
+                    -EXTRACT(EPOCH FROM (NOW() - COALESCE(last_accessed, created_at))) / 86400.0 / $2
+                  )) < 0.15
+            """, layer, decay_days)
+            affected = int(result.split()[-1]) if result else 0
+            if affected > 0:
+                print(f"🧹 遗忘检查: layer={layer} 标记了 {affected} 条不活跃记忆")
+    print("✅ 衰减遗忘检查完成")
