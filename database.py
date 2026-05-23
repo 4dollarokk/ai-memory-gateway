@@ -757,7 +757,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
     async with pool.acquire() as conn:
         candidates = {}  # id -> {content, importance, created_at, kw_score, similarity}
         
-        # ---- 关键词路 ----
+                # ---- 关键词路 ----
         if keywords:
             case_parts = []
             params = []
@@ -784,7 +784,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             """
             kw_rows = await conn.fetch(kw_sql, *params)
             
-           for r in kw_rows:
+            for r in kw_rows:
                 candidates[r['id']] = {
                     'content': r['content'],
                     'importance': r['importance'],
