@@ -61,9 +61,13 @@
                 <div class="card layer-tabs-card">
                     <div class="layer-tabs">
                         <button class="layer-tab active" data-layer="all" onclick="switchLayer('all')">全部</button>
-                        <button class="layer-tab" data-layer="3" onclick="switchLayer(3)">核心记忆 <span id="count-layer-3">0</span></button>
-                        <button class="layer-tab" data-layer="2" onclick="switchLayer(2)">事件记忆 <span id="count-layer-2">0</span></button>
-                        <button class="layer-tab" data-layer="1" onclick="switchLayer(1)">原始碎片 <span id="count-layer-1">0</span></button>
+                        <button class="layer-tab" data-layer="7" onclick="switchLayer(7)">核心 <span id="count-layer-7">0</span></button>
+                        <button class="layer-tab" data-layer="6" onclick="switchLayer(6)">习惯 <span id="count-layer-6">0</span></button>
+                        <button class="layer-tab" data-layer="5" onclick="switchLayer(5)">人物 <span id="count-layer-5">0</span></button>
+                        <button class="layer-tab" data-layer="4" onclick="switchLayer(4)">情感 <span id="count-layer-4">0</span></button>
+                        <button class="layer-tab" data-layer="3" onclick="switchLayer(3)">技术 <span id="count-layer-3">0</span></button>
+                        <button class="layer-tab" data-layer="2" onclick="switchLayer(2)">事件 <span id="count-layer-2">0</span></button>
+                        <button class="layer-tab" data-layer="1" onclick="switchLayer(1)">碎片 <span id="count-layer-1">0</span></button>
                         <label class="checkbox-label" style="margin-left:auto;">
                             <input type="checkbox" id="showInactive" onchange="memCurrentPage=1;filterAndSort()">
                             <span>显示已归档</span>
@@ -165,8 +169,13 @@
                     <div class="form-group">
                         <label class="form-label">层级：</label>
                         <select id="mergeLayer" class="select-input">
-                            <option value="2">事件记忆</option>
-                            <option value="3">核心记忆</option>
+                            <option value="1">碎片</option>
+                            <option value="2">事件</option>
+                            <option value="3">技术</option>
+                            <option value="4">情感</option>
+                            <option value="5">人物</option>
+                            <option value="6">习惯</option>
+                            <option value="7">核心</option>
                         </select>
                     </div>
                     <div class="modal-actions">
