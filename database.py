@@ -757,7 +757,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
     async with pool.acquire() as conn:
         candidates = {}  # id -> {content, importance, created_at, kw_score, similarity}
         
-                # ---- 关键词路 ----
+        # ---- 关键词路 ----
         if keywords:
             case_parts = []
             params = []
@@ -811,7 +811,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             else:
                 # Python端计算cosine
                 import json
-               all_mem = await conn.fetch("""
+                all_mem = await conn.fetch("""
                     SELECT id, content, importance, created_at, layer, emotional_intensity, embedding_json
                     FROM memories WHERE embedding_json IS NOT NULL AND is_active = TRUE
                 """)
@@ -871,8 +871,8 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             imp = info['importance'] / 10.0
             days = (now - info['created_at']).total_seconds() / 86400.0
             rec = 1.0 / (1.0 + days)
-            
-           layer = info.get('layer', 1) or 1
+
+            layer = info.get('layer', 1) or 1
             ei = info.get('emotional_intensity', 1) or 1
             layer_bonus = LAYER_BONUS.get(layer, 1.0)
             ei_bonus = 1.0 + (ei - 1) * 0.1
@@ -920,7 +920,6 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             print(f"🔍 混合搜索 '{query}' → 无结果" + (f"（{filtered} 条被过滤）" if filtered else ""))
         
         return [dict(r) for r in results]
-
 
 async def get_pending_memory_embedding_count():
     """查询还没有embedding的记忆数量"""
