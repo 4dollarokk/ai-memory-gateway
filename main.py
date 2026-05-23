@@ -881,6 +881,8 @@ async def chat_completions(request: Request):
     # 方式2: 自动检测标题生成等辅助请求
     if not skip_conversation_log:
         for msg in messages:
+            if msg.get("role") != "user":
+                continue
             c = msg.get("content", "")
             if isinstance(c, str):
                 cl = c.lower()
