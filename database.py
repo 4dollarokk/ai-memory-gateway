@@ -1584,17 +1584,17 @@ async def deactivate_memories(memory_ids: list):
 
 
 async def promote_to_core(memory_id: int, title: str = None):
-    """将记忆升级为核心记忆"""
+    """将记忆升级为核心记忆（layer 7）"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         if title:
             await conn.execute("""
-                UPDATE memories SET layer = 3, title = $2
+                UPDATE memories SET layer = 7, title = $2
                 WHERE id = $1
             """, memory_id, title)
         else:
             await conn.execute("""
-                UPDATE memories SET layer = 3
+                UPDATE memories SET layer = 7
                 WHERE id = $1
             """, memory_id)
 
@@ -1780,6 +1780,10 @@ async def get_layer_statistics():
             "layer_1": {"total": 0, "active": 0},  # 原始碎片
             "layer_2": {"total": 0, "active": 0},  # 事件记忆
             "layer_3": {"total": 0, "active": 0},  # 核心记忆
+            "layer_4": {"total": 0, "active": 0},
+            "layer_5": {"total": 0, "active": 0},
+            "layer_6": {"total": 0, "active": 0},
+            "layer_7": {"total": 0, "active": 0},
         }
         
         for row in rows:
