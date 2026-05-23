@@ -219,9 +219,29 @@ async def lifespan(app: FastAPI):
             print("⚠️  记忆系统将不可用，但网关仍可正常转发")
     else:
         print("ℹ️  记忆系统已关闭（设置 MEMORY_ENABLED=true 开启）")
+        
+    # 启动衰减遗忘定时任务（每天凌晨 3:00 执行）
+    import asyncio as _asyncio
+    async def _decay_scheduler():
+        ...
+    if MEMORY_ENABLED:
+        asyncio.create_task(_decay_scheduler())
+        print("⏰ 衰减遗忘定时任务已启动（每天凌晨 3:00 执行）")
     
+    # 衰减检查日标记：服务启动时，如果今天还没做过衰减，立即执行一次
+    if MEMORY_ENABLED:
+        try:
+            from database import get_gateway_config, set_gateway_config
+            last_check = await get_gateway_config("last_decay_check", "")
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            if last_check != today_str:
+                from database import apply_decay_forgetting
+                await apply_decay_forgetting()
+                await set_gateway_config("last_decay_check", today_str)
+        except Exception as e:
+            print(f"⚠️ 初始衰减检查失败: {e}")
     yield
-    
+   
     if MEMORY_ENABLED:
         await close_pool()
 
@@ -811,6 +831,8 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 content=mem["content"],
                 importance=mem["importance"],
                 source_session=session_id,
+                layer=mem.get("layer", 1),
+                emotional_intensity=mem.get("emotional_intensity", 1),
             )
         
         if filtered_memories:
@@ -875,23 +897,9 @@ async def chat_completions(request: Request):
     messages = body.get("messages", [])
     
     # ---------- 检测是否应跳过对话存储 ----------
-    # 方式1: 客户端通过header显式声明
+    # 客户端通过header显式声明（如标题生成等辅助请求）
     skip_conversation_log = request.headers.get("X-Skip-Conversation-Log", "").lower() == "true"
-    # 方式2: 自动检测标题生成等辅助请求
-    # if not skip_conversation_log:
-        # for msg in messages:
-            # if msg.get("role") != "user":
-                # continue
-            # c = msg.get("content", "")
-            # if isinstance(c, str):
-                # cl = c.lower()
-                # if ("title" in cl and "summarize" in cl) or ("标题" in cl and ("总结" in cl or "概括" in cl)):
-                    # skip_conversation_log = True
-                    # print("⏭️  检测到标题生成请求，跳过对话存储")
-                    # break
-    
-    body = await request.json()
-    messages = body.get("messages", [])
+    skip_conversation_log = False  # 强制忽略客户端跳过头（防止误判）
     
     # ---------- 提取用户最新消息 ----------
     user_message = ""
@@ -1071,7 +1079,19 @@ async def chat_completions(request: Request):
     debug_keys = {k: v for k, v in body.items() if k in ('reasoning_effort', 'google', 'reasoning')}
     if debug_keys:
         print(f"📡 推理字段: {debug_keys}", flush=True)
-    
+    # ---------- 请求触发式衰减检查 ----------
+    if MEMORY_ENABLED:
+        try:
+            from database import get_gateway_config, set_gateway_config
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            last_check = await get_gateway_config("last_decay_check", "")
+            if last_check != today_str:
+                from database import apply_decay_forgetting
+                await apply_decay_forgetting()
+                await set_gateway_config("last_decay_check", today_str)
+        except Exception as e:
+            print(f"⚠️ 衰减检查失败: {e}")
+            
     if is_stream:
         return StreamingResponse(
             stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages),
