@@ -773,7 +773,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             limit_idx = len(keywords) + 1
             params.append(limit * 3)
             
-           kw_sql = f"""
+            kw_sql = f"""
                 SELECT id, content, importance, created_at, layer, emotional_intensity,
                        ({hit_count_expr}) AS hit_count,
                        ({hit_count_expr})::float / {max_hits}.0 AS kw_score
