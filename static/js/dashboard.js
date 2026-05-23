@@ -62,7 +62,11 @@ const MEM_PER_PAGE = 50;
 const LAYER_NAMES = {
     1: '碎片',
     2: '事件',
-    3: '核心'
+    3: '技术',
+    4: '情感',
+    5: '人物',
+    6: '习惯',
+    7: '核心'
 };
 
 // ============================================
@@ -157,12 +161,10 @@ function switchLayer(layer) {
 }
 
 function updateLayerCounts(stats) {
-    const el1 = document.getElementById('count-layer-1');
-    const el2 = document.getElementById('count-layer-2');
-    const el3 = document.getElementById('count-layer-3');
-    if (el1) el1.textContent = stats.layer_1?.active || 0;
-    if (el2) el2.textContent = stats.layer_2?.active || 0;
-    if (el3) el3.textContent = stats.layer_3?.active || 0;
+    for (let i = 1; i <= 7; i++) {
+        const el = document.getElementById('count-layer-' + i);
+        if (el) el.textContent = stats['layer_' + i]?.active || 0;
+    }
 }
 
 // ============================================
@@ -192,11 +194,12 @@ function renderTable(mems, startIndex) {
         const mergedFrom = m.merged_from || [];
         
         // 层级下拉选择器
-        const layerSelect = '<select class="layer-select" id="l_' + m.id + '" onchange="changeLayer(' + m.id + ')">' +
-            '<option value="1"' + (layer === 1 ? ' selected' : '') + '>碎片</option>' +
-            '<option value="2"' + (layer === 2 ? ' selected' : '') + '>事件</option>' +
-            '<option value="3"' + (layer === 3 ? ' selected' : '') + '>核心</option>' +
-            '</select>';
+        const layerNames = {1:'碎片',2:'事件',3:'技术',4:'情感',5:'人物',6:'习惯',7:'核心'};
+        let layerSelect = '<select class="layer-select" id="l_' + m.id + '" onchange="changeLayer(' + m.id + ')">';
+        for (let i = 1; i <= 7; i++) {
+            layerSelect += '<option value="' + i + '"' + (layer === i ? ' selected' : '') + '>' + layerNames[i] + '</option>';
+        }
+        layerSelect += '</select>';
         
         // 合并来源提示
         let mergeInfo = '';
