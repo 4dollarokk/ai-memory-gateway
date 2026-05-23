@@ -877,19 +877,18 @@ async def chat_completions(request: Request):
     # ---------- 检测是否应跳过对话存储 ----------
     # 方式1: 客户端通过header显式声明
     skip_conversation_log = request.headers.get("X-Skip-Conversation-Log", "").lower() == "true"
-    skip_conversation_log = False
     # 方式2: 自动检测标题生成等辅助请求
-    if not skip_conversation_log:
-        for msg in messages:
-            if msg.get("role") != "user":
-                continue
-            c = msg.get("content", "")
-            if isinstance(c, str):
-                cl = c.lower()
-                if ("title" in cl and "summarize" in cl) or ("标题" in cl and ("总结" in cl or "概括" in cl)):
-                    skip_conversation_log = True
-                    print("⏭️  检测到标题生成请求，跳过对话存储")
-                    break
+    # if not skip_conversation_log:
+        # for msg in messages:
+            # if msg.get("role") != "user":
+                # continue
+            # c = msg.get("content", "")
+            # if isinstance(c, str):
+                # cl = c.lower()
+                # if ("title" in cl and "summarize" in cl) or ("标题" in cl and ("总结" in cl or "概括" in cl)):
+                    # skip_conversation_log = True
+                    # print("⏭️  检测到标题生成请求，跳过对话存储")
+                    # break
     
     body = await request.json()
     messages = body.get("messages", [])
