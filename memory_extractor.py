@@ -57,12 +57,32 @@ EXTRACTION_PROMPT = """你是信息提取专家，负责从对话中识别并提
 # 输出格式
 请用以下 JSON 格式返回（不要包含其他内容）：
 [
-  {{"content": "记忆内容", "importance": 分数}},
-  {{"content": "记忆内容", "importance": 分数}}
+  {{
+    "content": "记忆内容",
+    "importance": 分数,
+    "layer": 层级数字,
+    "emotional_intensity": 情感强度数字
+  }}
 ]
 
 importance 分数 1-10，10 最重要。
 如果没有值得记住的新信息，返回空数组：[]
+
+# 层级定义（layer）
+1 = 碎片：日常琐事、临时信息
+2 = 事件：具体发生的事件、约定
+3 = 技术：技术方案、代码、工具使用
+4 = 情感：重要的情感时刻、关系里程碑
+5 = 人物：关于特定人物的信息
+6 = 习惯：用户的日常规律、偏好、作息
+7 = 核心：身份信息、核心价值观、不可改变的事实
+
+# 情感强度定义（emotional_intensity）
+1 = 平淡：日常事务性信息
+2 = 有点感觉：有轻微情绪色彩
+3 = 触动：明显的情感波动
+4 = 强烈：强烈的情绪体验
+5 = 刻骨：核心情感记忆，不可遗忘
 """
 
 
@@ -175,6 +195,8 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
                     valid_memories.append({
                         "content": str(mem["content"]),
                         "importance": int(mem.get("importance", 5)),
+                        "layer": int(mem.get("layer", 1)),
+                        "emotional_intensity": int(mem.get("emotional_intensity", 1)),
                     })
 
             print(f"📝 从对话中提取了 {len(valid_memories)} 条新记忆（已对比 {len(existing_memories or [])} 条已有记忆）")
