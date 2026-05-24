@@ -228,18 +228,16 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_decay_scheduler())
         print("⏰ 衰减遗忘定时任务已启动（每天凌晨 3:00 执行）")
     
-    # 衰减检查日标记：服务启动时，如果今天还没做过衰减，立即执行一次
-    if MEMORY_ENABLED:
-        try:
-            from database import get_gateway_config, set_gateway_config
-            last_check = await get_gateway_config("last_decay_check", "")
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            if last_check != today_str:
-                from database import apply_decay_forgetting
-                await apply_decay_forgetting()
-                await set_gateway_config("last_decay_check", today_str)
-        except Exception as e:
-            print(f"⚠️ 初始衰减检查失败: {e}")
+        # 衰减检查日标记：服务启动时，如果今天还没做过衰减，立即执行一次
+        if MEMORY_ENABLED:
+            try:
+                last_check = await _db_module.get_gateway_config("last_decay_check", "")
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                if last_check != today_str:
+                    await _db_module.apply_decay_forgetting()
+                    await _db_module.set_gateway_config("last_decay_check", today_str)
+            except Exception as e:
+                print(f"⚠️ 初始衰减检查失败: {e}")
     yield
    
     if MEMORY_ENABLED:
@@ -1082,13 +1080,11 @@ async def chat_completions(request: Request):
     # ---------- 请求触发式衰减检查 ----------
     if MEMORY_ENABLED:
         try:
-            from database import get_gateway_config, set_gateway_config
             today_str = datetime.now().strftime("%Y-%m-%d")
-            last_check = await get_gateway_config("last_decay_check", "")
+            last_check = await _db_module.get_gateway_config("last_decay_check", "")
             if last_check != today_str:
-                from database import apply_decay_forgetting
-                await apply_decay_forgetting()
-                await set_gateway_config("last_decay_check", today_str)
+                await _db_module.apply_decay_forgetting()
+                await _db_module.set_gateway_config("last_decay_check", today_str)
         except Exception as e:
             print(f"⚠️ 衰减检查失败: {e}")
             
