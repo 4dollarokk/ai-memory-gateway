@@ -1,4 +1,3 @@
-# coding: utf-8
 """
 AI Memory Gateway — 带记忆系统的 LLM 转发网关
 =============================================
@@ -52,7 +51,7 @@ PORT = int(os.getenv("PORT", "8080"))
 MEMORY_ENABLED = os.getenv("MEMORY_ENABLED", "false").lower() == "true"
 
 # 每次注入的最大记忆条数
-MAX_MEMORIES_INJECT = int(os.getenv("MAX_MEMORIES_INJECT", "8"))
+MAX_MEMORIES_INJECT = int(os.getenv("MAX_MEMORIES_INJECT", "15"))
 
 # 记忆提取间隔（0 = 禁用自动提取，1 = 每轮提取，N = 每 N 轮提取一次）
 MEMORY_EXTRACT_INTERVAL = int(os.getenv("MEMORY_EXTRACT_INTERVAL", "1"))
@@ -368,14 +367,12 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
         conversation_text += f"{role_label}: {content}\n\n"
     
     prompt = f"""请将以下对话压缩成简洁摘要。保留关键信息（事件、决定、情感、约定），去掉日常寒暄和重复内容。用第三人称叙述，控制在300字以内。
-**摘要开头必须标注对话的时间范围**，格式如（2026-05-23 下午 ~ 2026-05-24 上午）。如果对话跨天，写出起止日期；如果都在同一天，写出当天的日期和大致的时段。
-"""
 
 ---
 {conversation_text}
 ---
 
-摘要:"""
+摘要："""
     
     try:
         headers = {
@@ -586,15 +583,6 @@ async def build_partitioned_messages(
             text = m.get('content') or ''
             if isinstance(text, str) and text:
                 m['content'] = [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
-    # 同步最近 3 轮对话（确保 AI 看到最即时上下文）
-    recent_rounds = rounds[-3:] if len(rounds) >= 3 else rounds
-    recent_msgs = [msg for rnd in recent_rounds for msg in rnd]
-    for msg in recent_msgs:
-        m = {k: v for k, v in msg.items() if k not in ('created_at', 'tool_calls')}
-        if m.get('role') == 'tool':
-            continue
-        if m.get('role') == 'assistant' and not (m.get('content') or '').strip():
-            continue
         result.append(m)
     
     if current_user_msg:
