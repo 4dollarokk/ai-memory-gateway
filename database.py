@@ -25,7 +25,7 @@ HAS_PGVECTOR = False  # 在init_tables时检测
 EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY", "")
 EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL", "https://api.openai.com/v1")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
-EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "256"))
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
 
 # 记忆向量搜索开关（需要同时设置 EMBEDDING_API_KEY）
 MEMORY_VECTOR_ENABLED = os.getenv("MEMORY_VECTOR_ENABLED", "false").lower() == "true"
