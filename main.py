@@ -454,6 +454,31 @@ def _should_rotate(b_rounds_count: int, X: int, a_msgs: list) -> bool:
 CACHE_MAX_ROTATIONS = int(os.getenv("CACHE_MAX_ROTATIONS", "2"))
 
 
+def _apply_breakpoint(msg: dict) -> bool:
+    """
+    给消息打上 cache_control breakpoint。
+    支持 content 为 str 或 list（多模态block数组）两种格式。
+    返回 True 表示成功打上，False 表示无法打（比如content为空）。
+    """
+    content = msg.get('content')
+    
+    # content 是纯字符串
+    if isinstance(content, str) and content.strip():
+        msg['content'] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+        return True
+    
+    # content 是 block 数组（多模态消息）
+    if isinstance(content, list):
+        # 从后往前找最后一个 text block
+        for i in range(len(content) - 1, -1, -1):
+            block = content[i]
+            if isinstance(block, dict) and block.get("type") == "text" and block.get("text", "").strip():
+                block["cache_control"] = {"type": "ephemeral"}
+                return True
+    
+    return False
+
+
 async def build_partitioned_messages(
     session_id: str,
     all_messages: list,
@@ -571,28 +596,22 @@ async def build_partitioned_messages(
             continue
         cleaned_a.append(m)
     
-    for i, m in enumerate(cleaned_a):
-        if i == len(cleaned_a) - 1 and m.get('role') != 'tool':
-            text = m.get('content') or ''
-            if isinstance(text, str) and text:
-                m['content'] = [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+    # A区：从末尾往前找第一条非tool消息打BP
+    for j in range(len(cleaned_a) - 1, -1, -1):
+        if cleaned_a[j].get('role') != 'tool' and _apply_breakpoint(cleaned_a[j]):
+            break
+    
+    for m in cleaned_a:
         result.append(m)
     
-    for i, msg in enumerate(b_msgs):
-        m = {k: v for k, v in msg.items() if k not in ('created_at',)}
-        if i == len(b_msgs) - 1 and len(b_msgs) > 0 and msg.get('role') != 'tool':
-            text = m.get('content') or ''
-            if isinstance(text, str) and text:
-                m['content'] = [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
-    # 同步最近 3 轮对话（确保 AI 看到最即时上下文）
-    recent_rounds = rounds[-3:] if len(rounds) >= 3 else rounds
-    recent_msgs = [msg for rnd in recent_rounds for msg in rnd]
-    for msg in recent_msgs:
-        m = {k: v for k, v in msg.items() if k not in ('created_at', 'tool_calls')}
-        if m.get('role') == 'tool':
-            continue
-        if m.get('role') == 'assistant' and not (m.get('content') or '').strip():
-            continue
+    # B区：先构建去掉created_at的副本，再从末尾往前打BP
+    b_cleaned = [{k: v for k, v in msg.items() if k not in ('created_at',)} for msg in b_msgs]
+    
+    for j in range(len(b_cleaned) - 1, -1, -1):
+        if b_cleaned[j].get('role') != 'tool' and _apply_breakpoint(b_cleaned[j]):
+            break
+    
+    for m in b_cleaned:
         result.append(m)
     
     if current_user_msg:
@@ -635,12 +654,14 @@ async def _build_basic_cached(
             "content": [{"type": "text", "text": base_prompt, "cache_control": {"type": "ephemeral"}}]
         })
     
-    for i, msg in enumerate(history):
-        m = {k: v for k, v in msg.items() if k not in ('created_at',)}
-        if i == len(history) - 1 and len(history) > 0 and msg.get('role') != 'tool':
-            text = m.get('content') or ''
-            if isinstance(text, str) and text:
-                m['content'] = [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+    h_cleaned = [{k: v for k, v in msg.items() if k not in ('created_at',)} for msg in history]
+    
+    # 从末尾往前找第一条非tool消息打BP
+    for j in range(len(h_cleaned) - 1, -1, -1):
+        if h_cleaned[j].get('role') != 'tool' and _apply_breakpoint(h_cleaned[j]):
+            break
+    
+    for m in h_cleaned:
         result.append(m)
     
     if current_user_msg:
