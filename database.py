@@ -428,8 +428,8 @@ async def compute_embedding(text: str) -> list:
     try:
         import httpx
         
-        if len(text) > 4000:
-            text = text[:4000]
+        if len(text) > 1500:
+            text = text[:1500]
         
         body = {
             "model": EMBEDDING_MODEL,
