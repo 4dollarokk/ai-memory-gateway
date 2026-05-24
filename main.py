@@ -374,7 +374,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
 {conversation_text}
 ---
 
-摘要："""
+摘要:"""
     
     try:
         headers = {
