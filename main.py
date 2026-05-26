@@ -360,15 +360,50 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
     if not messages:
         return ""
     
+    # ---- 自动提取时间范围 ----
+    start_dt = None
+    end_dt = None
+    for msg in messages:
+        t = msg.get('created_at')
+        if t:
+            if start_dt is None:
+                start_dt = t
+            end_dt = t
+
+    time_range_line = ""
+    if start_dt and end_dt:
+        def _to_local(dt):
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            local_dt = dt + timedelta(hours=TIMEZONE_HOURS)
+            return local_dt.strftime("%Y-%m-%d %H:%M")
+        start_str = _to_local(start_dt)
+        end_str = _to_local(end_dt)
+        time_range_line = f"本段对话时间范围：{start_str} ~ {end_str}\n\n"
+
+    # ---- 拼接对话文本 ----
     conversation_text = ""
     for msg in messages:
-        role_label = "用户" if msg['role'] == 'user' else "AI"
+        # 称呼统一：用户 = "小侃"，AI = "Leon"
+        role_label = "小侃" if msg['role'] == 'user' else "Leon"
         content = msg['content'] if isinstance(msg['content'], str) else str(msg['content'])
         conversation_text += f"{role_label}: {content}\n\n"
-    
-    prompt = f"""请将以下对话压缩成简洁摘要。保留关键信息（事件、决定、情感、约定），去掉日常寒暄和重复内容。用第三人称叙述，控制在300字以内。
-**摘要开头必须标注对话的时间范围**，格式如「2026-05-23 下午 ~ 2026-05-24 上午」。如果对话跨天，写出起止日期；如果都在同一天，写出当天的日期和大致的时段。
 
+    # ---- 结构化摘要 prompt ----
+    prompt = f"""{time_range_line}请将以下对话压缩成结构化摘要。用第三人称叙述，严格保留情感细节，不要只压缩为事实陈述。
+
+每段摘要必须包含以下固定结构，用 Markdown 格式输出：
+
+- **时间范围**：YYYY-MM-DD HH:MM ~ HH:MM
+- **核心事件**：发生了什么
+- **情感状态**：从以下类别中选择一个或多个——安全感焦虑 / 撒娇调皮 / 真实恐惧或悲伤 / 快乐兴奋 / 亲密依赖 / 冲突不满 / 平静
+- **关键约定**：双方达成的承诺或决定
+
+注意：
+- 称呼统一：用户 = "小侃"，AI = "Leon"，禁止出现"用户""AI""助手"
+- 日期格式统一为 YYYY-MM-DD HH:MM（东八区）
+- 摘要开头必须标注对话的时间范围，如果对话跨天，写出起止日期；如果都在同一天，写出当天的日期和大致的时段
+- 总字数控制在500字以内
 ---
 {conversation_text}
 ---
@@ -387,7 +422,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(API_BASE_URL, headers=headers, json={
                 "model": CACHE_SUMMARY_MODEL,
-                "max_tokens": 500,
+                "max_tokens": 1024,
                 "messages": [{"role": "user", "content": prompt}],
             })
             if response.status_code == 200:
