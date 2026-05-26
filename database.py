@@ -329,6 +329,23 @@ async def init_tables():
                     END IF;
                 END $$;
             """)
+        # ===== 日记表（独立存储，不参与记忆系统） =====
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS diary (
+                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                date            DATE NOT NULL,
+                content         TEXT NOT NULL DEFAULT '',
+                key_moments     TEXT DEFAULT '',
+                emotional_tone  TEXT DEFAULT '',
+                window_id       INTEGER DEFAULT 0,
+                created_at      TIMESTAMPTZ DEFAULT NOW(),
+                updated_at      TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_diary_date_window 
+            ON diary (date, window_id);
+        """)
     
     print("✅ 数据库表结构已就绪")
 
