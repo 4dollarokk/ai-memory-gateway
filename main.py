@@ -24,7 +24,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, ensure_conversation_titles_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, ensure_conversation_titles_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, get_today_diary, get_floating_memories
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories
 
@@ -75,6 +75,7 @@ TIMEZONE_HOURS = int(os.getenv("TIMEZONE_HOURS", "8"))
 
 # 轮次计数器
 _round_counter = 0
+_last_floating_date = None  # 防止同一天重复浮现
 
 # 强制流式传输（部分客户端不发stream=true导致thinking数据丢失，开启后强制所有请求走流式）
 FORCE_STREAM = os.getenv("FORCE_STREAM", "false").lower() == "true"
@@ -261,6 +262,7 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
     1. 用用户消息搜索相关记忆
     2. 格式化成文本拼接到人设后面
     """
+    global _last_floating_date
     if not MEMORY_ENABLED or not MEMORY_EXTRACT_ENABLED:
         return SYSTEM_PROMPT
     
@@ -269,12 +271,41 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
     
     try:
         memories = await search_memories(user_message, limit=MAX_MEMORIES_INJECT)
-        
-        if not memories:
-            return SYSTEM_PROMPT
-        
-        # 格式化记忆文本（带日期，帮助模型判断新旧）
+
+        # ---- 浮现记忆 ----
+        floating_memories = []
+        now_local = datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)
+        today_str = now_local.strftime("%Y-%m-%d")
+        three_days_ago = (now_local - timedelta(days=3)).date()
+
+        if _last_floating_date != today_str:
+            floating_memories = await get_floating_memories(three_days_ago, limit=2)
+            if floating_memories:
+                _last_floating_date = today_str
+                print(f"🌊 浮现了 {len(floating_memories)} 条三天前的高情感记忆")
+        else:
+            print(f"⏳ 今日已浮现过，跳过")
+
+        # ---- 今日日记 ----
+        diary = await get_today_diary()
+        diary_content = diary.get("content", "").strip() if diary else ""
+        diary_emotion = diary.get("emotional_tone", "").strip() if diary else ""
+        diary_moments = diary.get("key_moments", "").strip() if diary else ""
+
         memory_lines = []
+
+        # 浮现记忆
+        for fm in floating_memories:
+            date_label = ""
+            if fm.get("created_at"):
+                dt = fm["created_at"]
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                local_dt = dt + timedelta(hours=TIMEZONE_HOURS)
+                date_label = f"[{local_dt.strftime('%Y-%m-%d')}] "
+            memory_lines.append(f"- [浮现] {date_label}{fm['content']}")
+
+        # 搜索记忆
         for mem in memories:
             date_str = ""
             if mem.get("created_at"):
@@ -286,12 +317,23 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
                 except:
                     date_str = f"[{str(mem['created_at'])[:10]}] "
             memory_lines.append(f"- {date_str}{mem['content']}")
-        memory_text = "\n".join(memory_lines)
-        
+
+        # 今日日记
+        if diary_content:
+            tags = []
+            if diary_emotion:
+                tags.append(f"情绪：{diary_emotion}")
+            if diary_moments:
+                tags.append(f"关键时刻：{diary_moments}")
+            tag_str = "｜".join(tags)
+            memory_lines.append(f"- [今日日记｜{tag_str}] {diary_content}")
+
+        memory_text = "\n".join(memory_lines) if memory_lines else "（无相关记忆）"
+        memory_block = f"\n\n===== 系统检索到的记忆 =====\n{memory_text}\n===== 记忆结束 =====\n"
+
         enhanced_prompt = f"""{SYSTEM_PROMPT}
 
-【从过往对话中检索到的相关记忆】
-{memory_text}
+{memory_block}
 
 # 记忆应用
 - 像朋友般自然运用这些记忆，不刻意展示
@@ -307,7 +349,9 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
 
 记忆是丰富对话的工具，而非对话焦点。"""
         
-        print(f"📚 注入了 {len(memories)} 条相关记忆")
+        print(f"📚 注入了 {len(memories)} 条相关记忆" +
+              (f" + 浮现 {len(floating_memories)} 条" if floating_memories else "") +
+              (" + 今日日记" if diary_content else ""))
         return enhanced_prompt
         
     except Exception as e:
@@ -724,14 +768,49 @@ async def _build_basic_cached(
 
 async def build_memory_text(user_message: str) -> str:
     """搜索记忆并格式化为注入文本（分区缓存模式用）"""
+    global _last_floating_date
     if MAX_MEMORIES_INJECT <= 0:
         return ""
     try:
         memories = await search_memories(user_message, limit=MAX_MEMORIES_INJECT)
-        if not memories:
+
+        # ---- 浮现记忆 ----
+        floating_memories = []
+        now_local = datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)
+        today_str = now_local.strftime("%Y-%m-%d")
+        three_days_ago = (now_local - timedelta(days=3)).date()
+
+        if _last_floating_date != today_str:
+            floating_memories = await get_floating_memories(three_days_ago, limit=2)
+            if floating_memories:
+                _last_floating_date = today_str
+                print(f"🌊 浮现了 {len(floating_memories)} 条三天前的高情感记忆")
+        else:
+            print(f"⏳ 今日已浮现过，跳过")
+
+        # ---- 今日日记 ----
+        diary = await get_today_diary()
+        diary_content = diary.get("content", "").strip() if diary else ""
+        diary_emotion = diary.get("emotional_tone", "").strip() if diary else ""
+        diary_moments = diary.get("key_moments", "").strip() if diary else ""
+
+        if not memories and not diary_content and not floating_memories:
             return ""
-        
+
         memory_lines = []
+
+        # 浮现记忆（最前面）
+        for fm in floating_memories:
+            date_label = ""
+            if fm.get("created_at"):
+                dt = fm["created_at"]
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                local_dt = dt + timedelta(hours=TIMEZONE_HOURS)
+                date_label = f"[{local_dt.strftime('%Y-%m-%d')}] "
+            memory_lines.append(f"- [浮现] {date_label}{fm['content']}")
+
+        # 搜索记忆
         for mem in memories:
             date_str = ""
             if mem.get("created_at"):
@@ -743,9 +822,24 @@ async def build_memory_text(user_message: str) -> str:
                 except:
                     date_str = f"[{str(mem['created_at'])[:10]}] "
             memory_lines.append(f"- {date_str}{mem['content']}")
-        
-        print(f"📚 注入了 {len(memories)} 条相关记忆")
-        return "【从过往对话中检索到的相关记忆】\n" + "\n".join(memory_lines)
+
+        # 今日日记
+        if diary_content:
+            tags = []
+            if diary_emotion:
+                tags.append(f"情绪：{diary_emotion}")
+            if diary_moments:
+                tags.append(f"关键时刻：{diary_moments}")
+            tag_str = "｜".join(tags)
+            memory_lines.append(f"- [今日日记｜{tag_str}] {diary_content}")
+
+        memory_block = "\n".join(memory_lines)
+        print(f"📚 注入了 {len(memories)} 条记忆" +
+              (f" + 浮现 {len(floating_memories)} 条" if floating_memories else "") +
+              (" + 今日日记" if diary_content else ""))
+
+        return f"\n\n===== 系统检索到的记忆 =====\n{memory_block}\n===== 记忆结束 =====\n\n"
+
     except Exception as e:
         print(f"⚠️ 记忆检索失败: {e}")
         return ""
@@ -891,6 +985,11 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
             filtered_memories.append(mem)
         
         for mem in filtered_memories:
+            # 去重检查：避免意思相近的碎片反复存入
+            dup_result = await check_duplicate_memory(mem["content"], threshold=0.7)
+            if dup_result.get("is_duplicate"):
+                print(f"🚫 去重跳过: {mem['content'][:60]}... (匹配ID={dup_result.get('matched_id')}, 原因={dup_result.get('reason')})")
+                continue
             await save_memory(
                 content=mem["content"],
                 importance=mem["importance"],
