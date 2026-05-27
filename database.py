@@ -1812,8 +1812,46 @@ async def get_layer_statistics():
                 }
         
         return stats
+        
+async def get_today_diary() -> dict:
+    """获取今天最新的日记（含情绪标记）"""
+    from datetime import date
+    today = date.today().isoformat()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT content, emotional_tone, key_moments FROM diary WHERE date = $1 ORDER BY window_id DESC LIMIT 1",
+            today
+        )
+        if row:
+            return {
+                "content": row["content"] or "",
+                "emotional_tone": row["emotional_tone"] or "",
+                "key_moments": row["key_moments"] or "",
+            }
+        return {}
+        
+async def get_floating_memories(target_date, limit: int = 2):
+    """随机获取指定日期的高情感浓度记忆（东八区日期）"""
+    local_tz = dt_timezone(timedelta(hours=TIMEZONE_HOURS))
+    start_utc = datetime(target_date.year, target_date.month, target_date.day, tzinfo=local_tz).astimezone(dt_timezone.utc)
+    end_utc = start_utc + timedelta(days=1)
 
-
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, content, emotional_intensity, created_at
+            FROM memories
+            WHERE layer = 1
+              AND is_active = TRUE
+              AND emotional_intensity >= 3
+              AND created_at >= $1
+              AND created_at < $2
+            ORDER BY emotional_intensity DESC, RANDOM()
+            LIMIT $3
+        """, start_utc, end_utc, limit)
+        return [dict(r) for r in rows]
+        
 async def cleanup_old_fragments(days: int = 30):
     """清理指定天数前的归档碎片
     
