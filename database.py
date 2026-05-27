@@ -1816,7 +1816,7 @@ async def get_layer_statistics():
 async def get_today_diary() -> dict:
     """获取今天最新的日记（含情绪标记）"""
     from datetime import date
-    today = date.today().isoformat()
+    today = date.today()
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
