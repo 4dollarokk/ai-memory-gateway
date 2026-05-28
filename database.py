@@ -48,7 +48,7 @@ LAYER_BONUS = {
 
 # 各层时间衰减速度（天）
 LAYER_DECAY_DAYS = {
-    1: 30,     # 碎片
+    1: 7,     # 碎片
     2: 60,     # 事件
     3: 90,     # 技术
     4: 180,    # 情感（不自动遗忘）
@@ -1939,7 +1939,7 @@ async def apply_decay_forgetting():
                 SET is_active = FALSE
                 WHERE layer = $1
                   AND is_active = TRUE
-                  AND (importance::float / 10.0 * (hits + 1) * EXP(
+                  AND (importance::float / 10.0 * (hits + 1) * (1.0 + (COALESCE(emotional_intensity, 1) - 1) * 0.15) * EXP(
                     -EXTRACT(EPOCH FROM (NOW() - COALESCE(last_accessed, created_at))) / 86400.0 / $2
                   )) < 0.15
             """, layer, decay_days)
