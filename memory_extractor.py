@@ -139,7 +139,7 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
                 },
                 json={
                     "model": MEMORY_MODEL,
-                    "max_tokens": 1000,
+                    "max_tokens": 2048,
                     "messages": [
                         {"role": "system", "content": prompt},
                         {"role": "user", "content": f"请从以下对话中提取新的记忆：\n\n{conversation_text}"},
