@@ -360,6 +360,17 @@ async def init_tables():
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_memories_keyword ON memories (keyword);
         """)
+        # 情感和弦字段
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'chord'
+                ) THEN
+                    ALTER TABLE memories ADD COLUMN chord TEXT DEFAULT NULL;
+                END IF;
+            END $$;
+        """)
     
     print("✅ 数据库表结构已就绪")
 
