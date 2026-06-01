@@ -121,6 +121,9 @@ function switchSection(name) {
     if (name === 'settings') {
         loadSettings();
     }
+    if (name === 'cards') {
+        loadCards();
+    }
 }
 
 // ============================================
@@ -2073,4 +2076,83 @@ function showSettingsMsg(type, text) {
     el.className = 'msg-box msg-' + type;
     el.textContent = text;
     setTimeout(() => { el.style.display = 'none'; }, 5000);
+}
+// ============================================
+// 记忆卡片管理
+// ============================================
+
+async function loadCards() {
+    const list = document.getElementById('card-list');
+    try {
+        const resp = await fetch('/api/cards');
+        const data = await resp.json();
+        if (!data.cards || data.cards.length === 0) {
+            list.innerHTML = '<p style="color: var(--text-muted);">暂无记忆卡片，在上方输入关键词生成第一张。</p>';
+            return;
+        }
+        list.innerHTML = data.cards.map(c => `
+            <div class="card-item" id="card-${c.id}" style="border:1px solid var(--border); border-radius:8px; padding:15px; margin-bottom:12px; background: var(--bg-card);">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                    <strong>🃏 ${c.keyword || '(未命名)'}</strong>
+                    <small style="color: var(--text-muted);">${c.created_at || ''}</small>
+                </div>
+                <pre style="white-space: pre-wrap; background: var(--bg); padding: 12px; border-radius: 6px; font-size: 14px; line-height: 1.6; margin: 0;">${c.content}</pre>
+                <div style="margin-top: 10px; display: flex; gap: 8px;">
+                    <button class="btn btn-sm" onclick="editCard(${c.id})">编辑</button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteCard(${c.id})">删除</button>
+                </div>
+            </div>
+        `).join('');
+    } catch (e) {
+        list.innerHTML = '<p style="color: var(--text-muted);">加载失败</p>';
+    }
+}
+
+async function generateCard() {
+    const keyword = document.getElementById('card-keyword').value.trim();
+    if (!keyword) return alert('请输入关键词');
+    const loading = document.getElementById('card-loading');
+    const msg = document.getElementById('card-create-msg');
+    loading.style.display = 'inline';
+    msg.innerHTML = '';
+    try {
+        const resp = await fetch('/api/cards/generate', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({keyword})
+        });
+        const data = await resp.json();
+        if (data.error) {
+            msg.innerHTML = `<div class="msg msg-error">${data.error}</div>`;
+        } else {
+            msg.innerHTML = `<div class="msg msg-success">卡片生成成功！</div>`;
+            document.getElementById('card-keyword').value = '';
+            loadCards();
+        }
+    } catch (e) {
+        msg.innerHTML = '<div class="msg msg-error">请求出错</div>';
+    } finally {
+        loading.style.display = 'none';
+    }
+}
+
+async function deleteCard(id) {
+    if (!confirm('确定删除这张卡片吗？')) return;
+    await fetch('/api/cards/' + id, {method: 'DELETE'});
+    document.getElementById('card-' + id)?.remove();
+}
+
+async function editCard(id) {
+    const item = document.getElementById('card-' + id);
+    const pre = item.querySelector('pre');
+    const current = pre.textContent;
+    const newContent = prompt('编辑卡片内容：', current);
+    if (newContent && newContent !== current) {
+        await fetch('/api/cards/' + id, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({content: newContent})
+        });
+        pre.textContent = newContent;
+    }
 }
