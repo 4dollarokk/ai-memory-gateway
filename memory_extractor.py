@@ -61,7 +61,8 @@ EXTRACTION_PROMPT = """你是信息提取专家，负责从对话中识别并提
     "content": "记忆内容",
     "importance": 分数,
     "layer": 层级数字,
-    "emotional_intensity": 情感强度数字
+    "emotional_intensity": 情感强度数字,
+    "chord": "反映情感基调的和弦进行，如 Am → F → C → G · 72bpm。没有明显情感时可为空字符串"- chord: 反映该记忆情感基调的和弦进行，如 "Am → F → C → G · 72bpm"。只输出和弦，不要解释。
   }}
 ]
 
@@ -197,6 +198,7 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
                         "importance": int(mem.get("importance", 5)),
                         "layer": int(mem.get("layer", 1)),
                         "emotional_intensity": int(mem.get("emotional_intensity", 1)),
+                        "chord": str(mem.get("chord", "")),
                     })
 
             print(f"📝 从对话中提取了 {len(valid_memories)} 条新记忆（已对比 {len(existing_memories or [])} 条已有记忆）")
