@@ -333,7 +333,7 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
                     dt = dt.replace(tzinfo=timezone.utc)
                 local_dt = dt + timedelta(hours=TIMEZONE_HOURS)
                 date_label = f"[{local_dt.strftime('%Y-%m-%d')}] "
-                        chord_str = f"  🎵 {fm['chord']}" if fm.get('chord') else ""
+            chord_str = f"  🎵 {fm['chord']}" if fm.get('chord') else ""
             memory_lines.append(f"- [浮现] {date_label}{fm['content']}{chord_str}")
 
         for mem in memories:
@@ -346,7 +346,7 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
                     date_str = f"[{local_dt.strftime('%Y-%m-%d')}] "
                 except:
                     date_str = f"[{str(mem['created_at'])[:10]}] "
-                        chord_str = f"  🎵 {mem['chord']}" if mem.get('chord') else ""
+            chord_str = f"  🎵 {mem['chord']}" if mem.get('chord') else ""
             memory_lines.append(f"- {date_str}{mem['content']}{chord_str}")
 
         if diary_content:
