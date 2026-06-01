@@ -165,7 +165,7 @@ function switchLayer(layer) {
 }
 
 function updateLayerCounts(stats) {
-    for (let i = 1; i <= 7; i++) {
+    for (let i = 1; i <= 8; i++) {
         const el = document.getElementById('count-layer-' + i);
         if (el) el.textContent = stats['layer_' + i]?.active || 0;
     }
@@ -198,9 +198,9 @@ function renderTable(mems, startIndex) {
         const mergedFrom = m.merged_from || [];
         
         // 层级下拉选择器
-        const layerNames = {1:'碎片',2:'事件',3:'技术',4:'情感',5:'人物',6:'习惯',7:'核心'};
+        const layerNames = {1:'碎片',2:'事件',3:'技术',4:'情感',5:'人物',6:'习惯',7:'核心',8:'卡片'};
         let layerSelect = '<select class="layer-select" id="l_' + m.id + '" onchange="changeLayer(' + m.id + ')">';
-        for (let i = 1; i <= 7; i++) {
+        for (let i = 1; i <= 8; i++) {
             layerSelect += '<option value="' + i + '"' + (layer === i ? ' selected' : '') + '>' + layerNames[i] + '</option>';
         }
         layerSelect += '</select>';
