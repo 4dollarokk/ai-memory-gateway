@@ -24,7 +24,7 @@ from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, ensure_conversation_titles_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, get_today_diary, get_floating_memories
+from database import init_tables, close_pool, save_message, search_memories, save_memory, get_all_memories_count, get_recent_memories, get_all_memories, get_pool, get_all_memories_detail, update_memory, delete_memory, delete_memories_batch, get_gateway_config, set_gateway_config, get_all_gateway_config, get_conversation_messages, get_session_cache_state, save_session_cache_state, delete_session_cache_state, save_token_usage, ensure_token_usage_table, ensure_conversation_titles_table, get_conversations_paginated, delete_conversation, batch_delete_conversations, merge_sessions_to_target, list_all_session_cache_states, export_all_conversations, import_conversations, get_last_user_content, update_last_assistant_message, db_row_to_message, backfill_memory_embeddings, get_pending_memory_embedding_count, search_conversations, update_message_content, rename_session_id, get_fragments_by_date, get_fragments_by_date_range, create_event_memory, deactivate_memories, promote_to_core, merge_memories, check_duplicate_memory, update_memory_with_layer, get_layer_statistics, cleanup_old_fragments, revert_merge, get_today_diary, get_floating_memories, extract_search_keywords, get_fragments_by_keyword, get_memory_card
 import database as _db_module  # 用于 /api/settings 热更新 database.py 全局变量
 from memory_extractor import extract_memories, score_memories
 
@@ -270,14 +270,46 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
         return SYSTEM_PROMPT
     
     try:
+        # ---- 优先检查记忆卡片 ----
+        keywords = extract_search_keywords(user_message)
+        card = None
+        for kw in keywords:
+            card = await get_memory_card(kw)
+            if card:
+                break
+        
+        if card:
+            print(f"🃏 命中记忆卡片：{card.get('keyword')}，只推送卡片")
+            card_content = card.get('content', '')
+            card_block = f"\n\n===== 系统检索到的记忆卡片 =====\n🃏 {card_content}\n===== 卡片结束 =====\n"
+            enhanced_prompt = f"""{SYSTEM_PROMPT}
+
+{card_block}
+
+# 记忆应用
+- 这张卡片是关于“{card.get('keyword', '')}”的结构化记忆，请优先参考它来回应。
+- 像朋友般自然运用这些记忆，不刻意展示
+- 仅在相关话题出现时引用，避免主动提及
+- 对重要信息（如健康、日期、约定）保持一致性
+- 新信息与记忆冲突时，以新信息为准
+- 模糊记忆可表达不确定性："记得你似乎说过..."
+
+# 交流方式
+- 自然引用："记得你说过..."或"上次我们聊到..."
+- 避免机械式表达如"根据我的记忆..."或"检索到的信息显示..."
+- 共同经历可温情回忆："上次那个事挺好玩的"
+
+记忆是丰富对话的工具，而非对话焦点。"""
+            return enhanced_prompt
+
+        # ---- 原有逻辑 ----
         memories = await search_memories(user_message, limit=MAX_MEMORIES_INJECT)
 
-        # ---- 浮现记忆 ----
+        # 浮现记忆
         floating_memories = []
         now_local = datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)
         today_str = now_local.strftime("%Y-%m-%d")
         three_days_ago = (now_local - timedelta(days=3)).date()
-
         if _last_floating_date != today_str:
             floating_memories = await get_floating_memories(three_days_ago, limit=2)
             if floating_memories:
@@ -286,15 +318,13 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
         else:
             print(f"⏳ 今日已浮现过，跳过")
 
-        # ---- 今日日记 ----
+        # 日记
         diary = await get_today_diary()
         diary_content = diary.get("content", "").strip() if diary else ""
         diary_emotion = diary.get("emotional_tone", "").strip() if diary else ""
         diary_moments = diary.get("key_moments", "").strip() if diary else ""
 
         memory_lines = []
-
-        # 浮现记忆
         for fm in floating_memories:
             date_label = ""
             if fm.get("created_at"):
@@ -305,7 +335,6 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
                 date_label = f"[{local_dt.strftime('%Y-%m-%d')}] "
             memory_lines.append(f"- [浮现] {date_label}{fm['content']}")
 
-        # 搜索记忆
         for mem in memories:
             date_str = ""
             if mem.get("created_at"):
@@ -318,7 +347,6 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
                     date_str = f"[{str(mem['created_at'])[:10]}] "
             memory_lines.append(f"- {date_str}{mem['content']}")
 
-        # 今日日记
         if diary_content:
             tags = []
             if diary_emotion:
@@ -772,14 +800,27 @@ async def build_memory_text(user_message: str) -> str:
     if MAX_MEMORIES_INJECT <= 0:
         return ""
     try:
-        memories = await search_memories(user_message, limit=MAX_MEMORIES_INJECT)
+        # ---- 优先检查记忆卡片 ----
+        keywords = extract_search_keywords(user_message)
+        card = None
+        for kw in keywords:
+            card = await get_memory_card(kw)
+            if card:
+                break
+        
+        if card:
+            print(f"🃏 命中记忆卡片：{card.get('keyword')}，只推送卡片")
+            card_content = card.get('content', '')
+            return f"\n\n===== 系统检索到的记忆卡片 =====\n🃏 {card_content}\n===== 卡片结束 =====\n\n"
 
-        # ---- 浮现记忆 ----
+        # ---- 原有逻辑 ----
+        memories = await search_memories(user_message, limit=MAX_MEMORIES_INJECT)
+        
+        # 浮现记忆
         floating_memories = []
         now_local = datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)
         today_str = now_local.strftime("%Y-%m-%d")
         three_days_ago = (now_local - timedelta(days=3)).date()
-
         if _last_floating_date != today_str:
             floating_memories = await get_floating_memories(three_days_ago, limit=2)
             if floating_memories:
@@ -788,7 +829,7 @@ async def build_memory_text(user_message: str) -> str:
         else:
             print(f"⏳ 今日已浮现过，跳过")
 
-        # ---- 今日日记 ----
+        # 日记
         diary = await get_today_diary()
         diary_content = diary.get("content", "").strip() if diary else ""
         diary_emotion = diary.get("emotional_tone", "").strip() if diary else ""
@@ -798,8 +839,7 @@ async def build_memory_text(user_message: str) -> str:
             return ""
 
         memory_lines = []
-
-        # 浮现记忆（最前面）
+        # 浮现记忆
         for fm in floating_memories:
             date_label = ""
             if fm.get("created_at"):
@@ -823,7 +863,7 @@ async def build_memory_text(user_message: str) -> str:
                     date_str = f"[{str(mem['created_at'])[:10]}] "
             memory_lines.append(f"- {date_str}{mem['content']}")
 
-        # 今日日记
+        # 日记
         if diary_content:
             tags = []
             if diary_emotion:
@@ -1575,6 +1615,133 @@ async def api_batch_delete(request: Request):
         return {"error": "未选择记忆"}
     await delete_memories_batch(ids)
     return {"status": "ok", "deleted": len(ids)}
+
+# ============================================================
+# 记忆卡片 API
+# ============================================================
+
+@app.get("/api/cards")
+async def api_get_cards():
+    """获取所有记忆卡片（layer=8）"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    cards = await get_all_memories_detail(layer=8, active_only=True)
+    for c in cards:
+        if c.get("created_at"):
+            dt = c["created_at"]
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            tz_offset = timezone(timedelta(hours=TIMEZONE_HOURS))
+            c["created_at"] = dt.astimezone(tz_offset).strftime("%Y-%m-%d %H:%M:%S")
+    return {"cards": cards}
+
+
+@app.post("/api/cards/generate")
+async def api_generate_card(request: Request):
+    """根据关键词生成记忆卡片"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    
+    data = await request.json()
+    keyword = data.get("keyword", "").strip()
+    if not keyword:
+        return {"error": "关键词不能为空"}
+    
+    fragments = await get_fragments_by_keyword(keyword)
+    if not fragments:
+        return {"error": f"未找到包含「{keyword}」的记忆碎片"}
+    
+    fragments_text = "\n".join([
+        f"- [{f['created_at'].strftime('%Y-%m-%d') if hasattr(f['created_at'], 'strftime') else str(f['created_at'])[:10]}] {f['content']}"
+        for f in fragments
+    ])
+    
+    prompt = f"""请将以下关于「{keyword}」的记忆碎片整合成一张结构化记忆卡片。
+
+碎片内容：
+{fragments_text}
+
+请按以下格式输出卡片内容（纯文本）：
+
+【关键词卡片：{keyword}】
+- 首次提及：从碎片中推断最早日期
+- 最近更新：从碎片中推断最晚日期
+- 相关信息：
+  · 按时间线排列关键讨论要点
+  · 保留说话人的主观感受和情绪
+- 情绪标签：从以下选择——安全感焦虑 / 撒娇调皮 / 真实恐惧或悲伤 / 快乐兴奋 / 亲密依赖 / 冲突不满 / 平静
+- 关键决定或约定：如果有的话
+
+输出："""
+    
+    try:
+        headers = {
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json",
+        }
+        if "openrouter" in API_BASE_URL:
+            headers["HTTP-Referer"] = EXTRA_REFERER
+            headers["X-Title"] = EXTRA_TITLE
+        
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(API_BASE_URL, headers=headers, json={
+                "model": os.getenv("MEMORY_MODEL", "") or DEFAULT_MODEL,
+                "max_tokens": 2048,
+                "messages": [{"role": "user", "content": prompt}],
+            })
+            if response.status_code != 200:
+                return {"error": f"LLM 调用失败: HTTP {response.status_code}"}
+            
+            data_resp = response.json()
+            card_content = data_resp["choices"][0]["message"]["content"].strip()
+            
+            await save_memory(
+                content=card_content,
+                importance=8,
+                source_session="card-generator",
+                layer=8,
+                emotional_intensity=4,
+            )
+            
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT id FROM memories WHERE layer = 8 ORDER BY id DESC LIMIT 1"
+                )
+                if row:
+                    await conn.execute(
+                        "UPDATE memories SET keyword = $1 WHERE id = $2",
+                        keyword, row["id"]
+                    )
+            
+            return {"status": "ok", "keyword": keyword, "content": card_content}
+            
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.put("/api/cards/{card_id}")
+async def api_update_card(card_id: int, request: Request):
+    """更新记忆卡片内容"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    data = await request.json()
+    await update_memory_with_layer(
+        card_id,
+        content=data.get("content"),
+        importance=data.get("importance"),
+        keyword=data.get("keyword"),
+    )
+    return {"status": "ok"}
+
+
+@app.delete("/api/cards/{card_id}")
+async def api_delete_card(card_id: int):
+    """删除记忆卡片"""
+    if not MEMORY_ENABLED:
+        return {"error": "记忆系统未启用"}
+    await delete_memory(card_id)
+    return {"status": "ok"}
 
 
 # ============================================================
