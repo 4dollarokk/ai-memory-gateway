@@ -346,6 +346,20 @@ async def init_tables():
             CREATE UNIQUE INDEX IF NOT EXISTS idx_diary_date_window 
             ON diary (date, window_id);
         """)
+        # 记忆卡片关键词字段
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'keyword'
+                ) THEN
+                    ALTER TABLE memories ADD COLUMN keyword TEXT DEFAULT NULL;
+                END IF;
+            END $$;
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_keyword ON memories (keyword);
+        """)
     
     print("✅ 数据库表结构已就绪")
 
@@ -1947,3 +1961,34 @@ async def apply_decay_forgetting():
             if affected > 0:
                 print(f"🧹 遗忘检查: layer={layer} 标记了 {affected} 条不活跃记忆")
     print("✅ 衰减遗忘检查完成")
+
+    async def get_fragments_by_keyword(keyword: str, limit: int = 30):
+        """搜索包含关键词的活跃碎片（layer=1）"""
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT id, content, importance, created_at
+                FROM memories
+                WHERE layer = 1
+                  AND is_active = TRUE
+                  AND content ILIKE $1
+                ORDER BY created_at
+                LIMIT $2
+            """, f"%{keyword}%", limit)
+            return [dict(r) for r in rows]
+
+    async def get_memory_card(keyword: str) -> dict:
+        """按关键词查找记忆卡片（layer=8）"""
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT id, content, importance, emotional_intensity, keyword, merged_from
+                FROM memories
+                WHERE layer = 8
+                  AND keyword = $1
+                  AND is_active = TRUE
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, keyword)
+            return dict(row) if row else {}
+            
