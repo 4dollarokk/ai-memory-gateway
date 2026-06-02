@@ -680,12 +680,12 @@ async def update_message_content(message_id: int, new_content: str):
 # ============================================================
 
 async def save_memory(content: str, importance: int = 5, source_session: str = "",
-                      layer: int = 1, emotional_intensity: int = 1):
+                      layer: int = 1, emotional_intensity: int = 1, chord: str = ""):
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO memories (content, importance, source_session, layer, emotional_intensity) VALUES ($1, $2, $3, $4, $5) RETURNING id",
-            content, importance, source_session, layer, emotional_intensity,
+            "INSERT INTO memories (content, importance, source_session, layer, emotional_intensity, chord) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
+            content, importance, source_session, layer, emotional_intensity, chord,
         )
         
         # MEMORY_VECTOR_ENABLED 时自动计算 embedding
