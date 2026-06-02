@@ -1040,6 +1040,7 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 source_session=session_id,
                 layer=mem.get("layer", 1),
                 emotional_intensity=mem.get("emotional_intensity", 1),
+                chord=mem.get("chord", ""),
             )
         
         if filtered_memories:
