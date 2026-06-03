@@ -208,14 +208,14 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
                         except (ValueError, TypeError):
                             print(f"⚠️ 记忆过期时间解析失败: {expires_str}，将忽略")
                     
-                  valid_memories.append({
-                      "content": str(mem["content"]),
-                      "importance": int(mem.get("importance", 5)),
-                      "layer": int(mem.get("layer", 1)),
-                      "emotional_intensity": int(mem.get("emotional_intensity", 1)),
-                      "chord": str(mem.get("chord", "")),
-                      "expires_at": expires_dt,
-                  })
+                    valid_memories.append({
+                        "content": str(mem["content"]),
+                        "importance": int(mem.get("importance", 5)),
+                        "layer": int(mem.get("layer", 1)),
+                        "emotional_intensity": int(mem.get("emotional_intensity", 1)),
+                        "chord": str(mem.get("chord", "")),
+                        "expires_at": expires_dt,
+                    })
 
             print(f"📝 从对话中提取了 {len(valid_memories)} 条新记忆（已对比 {len(existing_memories or [])} 条已有记忆）")
             return valid_memories
