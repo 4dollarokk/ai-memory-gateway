@@ -2486,7 +2486,13 @@ async def api_partition_status():
     active_summaries = await _db_module.get_active_summaries(active_sid) if active_sid else {'overview': None, 'details': []}
     overview = active_summaries['overview']
     details = active_summaries['details']
-    all_summary_text = (overview + "\n\n---\n\n" + "\n\n".join(details)) if overview or details else ""
+    all_summary_text = ""
+if overview:
+    all_summary_text += overview
+if details:
+    if all_summary_text:
+        all_summary_text += "\n\n---\n\n"
+    all_summary_text += "\n\n".join(details)
     
     return {
         "enabled": CACHE_PARTITION_ENABLED,
