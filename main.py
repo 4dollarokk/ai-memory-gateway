@@ -2591,6 +2591,17 @@ async def api_switch_thread(request: Request):
         return {"error": str(e)}
 
 
+@app.post("/api/partition/consolidate")
+async def api_consolidate_overview():
+    """手动触发 overview 合并（立即执行）"""
+    active_sid = get_active_session_id()
+    if not active_sid:
+        return {"error": "未设置活跃对话线"}
+    
+    await maybe_consolidate_overview(active_sid)
+    return {"status": "ok", "message": "合并已触发，请查看日志"}
+
+
 @app.put("/api/partition/thread/rename")
 async def api_rename_thread(request: Request):
     global PARTITION_SESSION_ID
