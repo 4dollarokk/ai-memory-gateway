@@ -2131,18 +2131,21 @@ async def archive_detail_summaries(session_id: str, detail_ids: list):
         """, session_id, detail_ids)
 
 
-async def get_oldest_active_details(session_id: str, min_chars: int = 1500) -> list:
+async def get_oldest_active_details(session_id: str, min_chars: int = 1500, min_age_hours: int = 24) -> list:
     """
     取出最早的 active detail，直到累计字数 >= min_chars。
-    返回 [{'id':..., 'content':..., 'char_count':...}]
+    排除最近 min_age_hours 小时内创建的 detail。
     """
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT id, content, char_count FROM summary_entries
-            WHERE session_id = $1 AND type = 'detail' AND is_archived = FALSE
+            WHERE session_id = $1
+              AND type = 'detail'
+              AND is_archived = FALSE
+              AND created_at < NOW() - make_interval(hours => $2)
             ORDER BY created_at ASC
-        """, session_id)
+        """, session_id, min_age_hours)
         selected = []
         total = 0
         for r in rows:
