@@ -433,7 +433,108 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
     """调用轻量模型压缩A区消息为摘要"""
     if not messages:
         return ""
+        
+async def maybe_consolidate_overview(session_id: str):
+    """当 detail 总字数超过 3000 时，自动合并最早的 detail 为 overview"""
+    if not CACHE_PARTITION_ENABLED:
+        return
     
+    try:
+        active = await _db_module.get_active_summaries(session_id)
+        details = active['details']
+        total_chars = sum(len(d) for d in details)
+        
+        if total_chars < 3000:
+            return
+        
+        to_merge = await _db_module.get_oldest_active_details(session_id, min_chars=1500)
+        if not to_merge:
+            return
+        
+        old_overview = active['overview']
+        
+        details_text = "\n\n---\n\n".join(
+            f"[摘要 {i+1}]\n{item['content']}" for i, item in enumerate(to_merge)
+        )
+        prompt = f"""将以下多条对话摘要合并为一条总纲。保留：核心事件时间线、关键约定、重要情感转折、明确待办（格式：【待办：…】）。去掉：重复信息、日常细节、具体对话内容。总纲控制在两千字以内。
+
+同时检查下列摘要中是否有与用户长期相关的事实、偏好、约定、待办，且你认为尚未被记录为长期记忆。如果有，在 JSON 输出中的 missing_memories 字段逐条列出。
+
+当前已有的总纲（可能为空）：
+{old_overview or '(无)'}
+
+新的对话摘要：
+{details_text}
+
+请输出 JSON：
+{{
+  "overview": "总纲内容",
+  "missing_memories": ["事实1", "事实2"]
+}}"""
+        
+        headers = {
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json",
+        }
+        if "openrouter" in API_BASE_URL:
+            headers["HTTP-Referer"] = EXTRA_REFERER
+            headers["X-Title"] = EXTRA_TITLE
+        
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                API_BASE_URL,
+                headers=headers,
+                json={
+                    "model": CACHE_SUMMARY_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 2048,
+                }
+            )
+            if resp.status_code != 200:
+                print(f"⚠️ 合并 overview 失败: HTTP {resp.status_code}")
+                return
+            
+            data = resp.json()
+            text = data["choices"][0]["message"]["content"].strip()
+            
+            try:
+                result = json.loads(text)
+            except json.JSONDecodeError:
+                import re
+                match = re.search(r'\{.*\}', text, re.DOTALL)
+                if match:
+                    result = json.loads(match.group())
+                else:
+                    print("⚠️ 合并 overview 返回非 JSON")
+                    return
+            
+            new_overview = result.get("overview", "")
+            missing = result.get("missing_memories", [])
+            
+            if not new_overview:
+                print("⚠️ 合并 overview 返回为空，跳过")
+                return
+            
+            # 写入 overview（事务保护）
+            await _db_module.upsert_overview(session_id, new_overview)
+            print(f"✅ 合并 overview 完成 ({len(new_overview)}字)")
+            
+            # 补录 missing 记忆
+            if missing:
+                for fact in missing:
+                    dup = await check_duplicate_memory(fact, 0.8)
+                    if not dup.get("is_duplicate"):
+                        await save_memory(content=fact, importance=5, source_session=session_id)
+                        print(f"   📝 补录记忆: {fact[:50]}...")
+            
+            # 成功后归档旧的 detail
+            detail_ids = [item['id'] for item in to_merge]
+            await _db_module.archive_detail_summaries(session_id, detail_ids)
+            print(f"📦 归档了 {len(to_merge)} 条旧 detail")
+    
+    except Exception as e:
+        print(f"⚠️ 合并 overview 异常: {e}")
+        
     # ---- 自动提取时间范围 ----
     start_dt = None
     end_dt = None
@@ -661,6 +762,7 @@ async def build_partitioned_messages(
         
         new_summary = await generate_summary(a_msgs, session_id)
         if new_summary:
+            await _db_module.add_detail_summary(session_id, new_summary)
             summary_parts.append(new_summary)
         
         a_start_round += X
@@ -673,9 +775,37 @@ async def build_partitioned_messages(
     
     if rotation_count > 0:
         await save_session_cache_state(session_id, summary_parts, a_start_round)
+        await maybe_consolidate_overview(session_id)   # 新增：自动合并 detail 为 overview
         summary_total = sum(len(p) for p in summary_parts)
         print(f"🔄 轮转完成(共{rotation_count}次): 摘要{len(summary_parts)}段/{summary_total}字, A区{len(a_msgs)}条, B区{len(b_msgs)}条")
     
+        # ---- 获取分层摘要（overview + 最近 detail） ----
+    active_summaries = await _db_module.get_active_summaries(session_id)
+    overview = active_summaries['overview']
+    details = active_summaries['details']
+
+    MAX_SUMMARY_CHARS = 5000
+    final_parts = []
+    if overview:
+        final_parts.append(overview)
+        remaining = MAX_SUMMARY_CHARS - len(overview)
+    else:
+        remaining = MAX_SUMMARY_CHARS
+
+    # 从最新的 detail 开始取，直到字数用尽
+    for d in reversed(details):
+        if remaining <= 0:
+            break
+        if len(d) <= remaining:
+            final_parts.insert(1 if overview else 0, d)
+            remaining -= len(d)
+        else:
+            truncated = d[:remaining] + "..."
+            final_parts.insert(1 if overview else 0, truncated)
+            remaining = 0
+
+    summary_parts = final_parts
+
     # 拼装messages
     result = []
     if base_prompt:
@@ -683,7 +813,7 @@ async def build_partitioned_messages(
             "role": "system",
             "content": [{"type": "text", "text": base_prompt, "cache_control": {"type": "ephemeral"}}]
         })
-    
+
     # 摘要区（多block，尾部追加模式）
     if summary_parts:
         blocks = [{"type": "text", "text": "[以下是之前对话的摘要，帮助你回忆上下文]"}]
@@ -1041,6 +1171,7 @@ async def process_memories_background(session_id: str, user_msg: str, assistant_
                 layer=mem.get("layer", 1),
                 emotional_intensity=mem.get("emotional_intensity", 1),
                 chord=mem.get("chord", ""),
+                expires_at=mem.get("expires_at"),
             )
         
         if filtered_memories:
@@ -2351,15 +2482,22 @@ async def api_import_conversations(request: Request):
 async def api_partition_status():
     active_sid = get_active_session_id()
     state = await get_session_cache_state(active_sid) if active_sid else {}
+    
+    active_summaries = await _db_module.get_active_summaries(active_sid) if active_sid else {'overview': None, 'details': []}
+    overview = active_summaries['overview']
+    details = active_summaries['details']
+    all_summary_text = (overview + "\n\n---\n\n" + "\n\n".join(details)) if overview or details else ""
+    
     return {
         "enabled": CACHE_PARTITION_ENABLED,
         "active_session_id": active_sid,
         "partition_x": CACHE_PARTITION_X,
         "summary_model": CACHE_SUMMARY_MODEL,
-        "summary": '\n\n'.join(state.get('summary_parts', [])),
-        "summary_parts": state.get('summary_parts', []),
-        "summary_count": len(state.get('summary_parts', [])),
-        "summary_length": sum(len(p) for p in state.get('summary_parts', [])),
+        "summary": all_summary_text,
+        "overview": overview,
+        "details": details,
+        "summary_count": len(details) + (1 if overview else 0),
+        "summary_length": sum(len(d) for d in details) + (len(overview) if overview else 0),
         "a_start_round": state.get('a_start_round', 0),
         "updated_at": state.get('updated_at').isoformat() if state.get('updated_at') else None,
     }
@@ -2376,21 +2514,21 @@ async def api_partition_threads():
     return {"threads": threads, "active_session_id": active_sid}
 
 
-@app.put("/api/partition/summary")
-async def api_update_summary(request: Request):
+@app.delete("/api/partition/summary")
+async def api_clear_summary(request: Request):
     try:
         body = await request.json()
         sid = body.get("session_id", "")
-        summary = body.get("summary", "")
         if not sid:
             return {"error": "session_id 不能为空"}
-        state = await get_session_cache_state(sid)
-        summary_parts = [summary] if isinstance(summary, str) and summary else summary if isinstance(summary, list) else []
-        # 摘要清空时 a_start_round 也归零，否则历史会被跳过
-        a_start = state.get('a_start_round', 0) if summary_parts else 0
-        await save_session_cache_state(sid, summary_parts, a_start)
-        total_len = sum(len(p) for p in summary_parts)
-        return {"status": "ok", "summary_parts": len(summary_parts), "summary_length": total_len}
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE summary_entries SET is_archived = TRUE
+                WHERE session_id = $1 AND is_archived = FALSE
+            """, sid)
+        await save_session_cache_state(sid, [], 0)
+        return {"status": "ok"}
     except Exception as e:
         return {"error": str(e)}
 
