@@ -487,7 +487,7 @@ async def maybe_consolidate_overview(session_id: str):
                 json={
                     "model": CACHE_SUMMARY_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 2048,
+                    "max_tokens": 4096,
                 }
             )
             if resp.status_code != 200:
@@ -497,14 +497,13 @@ async def maybe_consolidate_overview(session_id: str):
             data = resp.json()
             text = data["choices"][0]["message"]["content"].strip()
             
-            # 多层容错提取 JSON
+            # ---- 多层容错提取 JSON ----
             result = None
             try:
-                # 第一层：直接解析
                 result = json.loads(text)
             except json.JSONDecodeError:
                 import re
-                # 第二层：提取 ```json ... ``` 代码块
+                # 第二层：```json ... ``` 代码块
                 code_match = re.search(r'```(?:json)?\s*\n?(\{.*?\})\s*```', text, re.DOTALL)
                 if code_match:
                     try:
@@ -512,15 +511,28 @@ async def maybe_consolidate_overview(session_id: str):
                     except json.JSONDecodeError:
                         pass
                 if result is None:
-                    # 第三层：提取第一个 { ... } 对象
+                    # 第三层：第一个 { ... }
                     match = re.search(r'\{.*\}', text, re.DOTALL)
                     if match:
                         try:
                             result = json.loads(match.group())
                         except json.JSONDecodeError:
                             pass
+                if result is None:
+                    # 第四层：被截断补丁（缺少 closing } 时，尝试补全并解析）
+                    if text.strip().startswith('"overview"') or text.strip().startswith('{'):
+                        # 尝试提取 overview 内容
+                        overview_match = re.search(r'"overview"\s*:\s*"((?:[^"\\]|\\.)*)"', text)
+                        if overview_match:
+                            overview_content = overview_match.group(1)
+                            result = {
+                                "overview": overview_content,
+                                "missing_memories": []
+                            }
+                            print(f"📋 通过截断补丁提取 overview ({len(overview_content)}字)")
             if result is None:
-                print(f"⚠️ 合并 overview 返回非 JSON，原始返回内容：\n{text[:500]}")
+                print(f"⚠️ 合并 overview 返回非 JSON，原始长度: {len(text)} 字符")
+                print(f"   原始内容(前500): {text[:500]}")
                 return
             
             new_overview = result.get("overview", "")
