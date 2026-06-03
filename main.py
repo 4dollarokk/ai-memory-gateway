@@ -2591,7 +2591,7 @@ async def api_switch_thread(request: Request):
         return {"error": str(e)}
 
 
-@app.post("/api/partition/consolidate")
+@app.get("/api/partition/consolidate")
 async def api_consolidate_overview():
     """手动触发 overview 合并（立即执行）"""
     active_sid = get_active_session_id()
