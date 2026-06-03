@@ -2487,12 +2487,12 @@ async def api_partition_status():
     overview = active_summaries['overview']
     details = active_summaries['details']
     all_summary_text = ""
-if overview:
-    all_summary_text += overview
-if details:
-    if all_summary_text:
-        all_summary_text += "\n\n---\n\n"
-    all_summary_text += "\n\n".join(details)
+    if overview:
+        all_summary_text += overview
+    if details:
+        if all_summary_text:
+            all_summary_text += "\n\n---\n\n"
+        all_summary_text += "\n\n".join(details)
     
     return {
         "enabled": CACHE_PARTITION_ENABLED,
