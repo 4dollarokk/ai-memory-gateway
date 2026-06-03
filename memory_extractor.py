@@ -62,12 +62,17 @@ EXTRACTION_PROMPT = """你是信息提取专家，负责从对话中识别并提
     "importance": 分数,
     "layer": 层级数字,
     "emotional_intensity": 情感强度数字,
-    "chord": "反映情感基调的和弦进行，如 Am → F → C → G · 72bpm。没有明显情感时可为空字符串"- chord: 反映该记忆情感基调的和弦进行，如 "Am → F → C → G · 72bpm"。只输出和弦，不要解释。
+    "chord": "反映情感基调的和弦进行，如 Am → F → C → G · 72bpm。没有明显情感时可为空字符串"- chord: 反映该记忆情感基调的和弦进行，如 "Am → F → C → G · 72bpm"。只输出和弦，不要解释,
+    "expires_at": "过期时间 ISO 8601 格式，如 2026-06-09T23:59:59+08:00。没有明确截止时间则为 null"
   }}
 ]
 
 importance 分数 1-10，10 最重要。
 如果没有值得记住的新信息，返回空数组：[]
+关于过期时间：
+- 如果记忆内容涉及明确的截止时间、预约日期、活动日期（例如"明天交报告""周末去西安""6月9号抢票"），请计算出该事件的结束日期并填入 expires_at（ISO 8601 格式，东八区时间）。
+- 对于周期性事件（如"每周五开会"），不填过期时间（留 null）。
+- 没有明确时间节点的事件或长期事实留 null。
 
 # 层级定义（layer）
 1 = 碎片：日常琐事、临时信息
@@ -190,16 +195,27 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
                 return []
 
             # 验证格式
+            from datetime import datetime
             valid_memories = []
             for mem in memories:
                 if isinstance(mem, dict) and "content" in mem:
-                    valid_memories.append({
-                        "content": str(mem["content"]),
-                        "importance": int(mem.get("importance", 5)),
-                        "layer": int(mem.get("layer", 1)),
-                        "emotional_intensity": int(mem.get("emotional_intensity", 1)),
-                        "chord": str(mem.get("chord", "")),
-                    })
+                    # 解析 expires_at
+                    expires_str = mem.get("expires_at")
+                    expires_dt = None
+                    if expires_str and isinstance(expires_str, str) and expires_str.strip():
+                        try:
+                            expires_dt = datetime.fromisoformat(expires_str.replace("Z", "+00:00"))
+                        except (ValueError, TypeError):
+                            print(f"⚠️ 记忆过期时间解析失败: {expires_str}，将忽略")
+                    
+                  valid_memories.append({
+                      "content": str(mem["content"]),
+                      "importance": int(mem.get("importance", 5)),
+                      "layer": int(mem.get("layer", 1)),
+                      "emotional_intensity": int(mem.get("emotional_intensity", 1)),
+                      "chord": str(mem.get("chord", "")),
+                      "expires_at": expires_dt,
+                  })
 
             print(f"📝 从对话中提取了 {len(valid_memories)} 条新记忆（已对比 {len(existing_memories or [])} 条已有记忆）")
             return valid_memories
