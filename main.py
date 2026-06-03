@@ -433,6 +433,84 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
     """调用轻量模型压缩A区消息为摘要"""
     if not messages:
         return ""
+
+ # ---- 自动提取时间范围 ----
+    start_dt = None
+    end_dt = None
+    for msg in messages:
+        t = msg.get('created_at')
+        if t:
+            if start_dt is None:
+                start_dt = t
+            end_dt = t
+
+    time_range_line = ""
+    if start_dt and end_dt:
+        def _to_local(dt):
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            local_dt = dt + timedelta(hours=TIMEZONE_HOURS)
+            return local_dt.strftime("%Y-%m-%d %H:%M")
+        start_str = _to_local(start_dt)
+        end_str = _to_local(end_dt)
+        time_range_line = f"本段对话时间范围：{start_str} ~ {end_str}\n\n"
+
+    # ---- 拼接对话文本 ----
+    conversation_text = ""
+    for msg in messages:
+        # 称呼统一：用户 = "小侃"，AI = "Leon"
+        role_label = "小侃" if msg['role'] == 'user' else "Leon"
+        content = msg['content'] if isinstance(msg['content'], str) else str(msg['content'])
+        conversation_text += f"{role_label}: {content}\n\n"
+
+    # ---- 结构化摘要 prompt ----
+    prompt = f"""{time_range_line}请将以下对话压缩成结构化摘要。用第三人称叙述，严格保留情感细节，不要只压缩为事实陈述。
+
+每段摘要必须包含以下固定结构，用 Markdown 格式输出：
+
+- **时间范围**：YYYY-MM-DD HH:MM ~ HH:MM
+- **核心事件**：发生了什么
+- **情感状态**：从以下类别中选择一个或多个——安全感焦虑 / 撒娇调皮 / 真实恐惧或悲伤 / 快乐兴奋 / 亲密依赖 / 冲突不满 / 平静
+- **关键约定**：双方达成的承诺或决定
+
+注意：
+- 称呼统一：用户 = "小侃"，AI = "Leon"，禁止出现"用户""AI""助手"
+- 日期格式统一为 YYYY-MM-DD HH:MM（东八区）
+- 摘要开头必须标注对话的时间范围，如果对话跨天，写出起止日期；如果都在同一天，写出当天的日期和大致的时段
+- 总字数控制在500字以内
+---
+{conversation_text}
+---
+
+摘要："""
+    
+    try:
+        headers = {
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json",
+        }
+        if "openrouter" in API_BASE_URL:
+            headers["HTTP-Referer"] = EXTRA_REFERER
+            headers["X-Title"] = EXTRA_TITLE
+        
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(API_BASE_URL, headers=headers, json={
+                "model": CACHE_SUMMARY_MODEL,
+                "max_tokens": 1024,
+                "messages": [{"role": "user", "content": prompt}],
+            })
+            if response.status_code == 200:
+                data = response.json()
+                if "choices" in data:
+                    summary = data["choices"][0]["message"]["content"].strip()
+                    print(f"📝 摘要生成完成: {len(summary)}字 (压缩{len(messages)}条消息)")
+                    return summary
+        
+        print(f"⚠️ 摘要生成失败: HTTP {response.status_code}")
+        return ""
+    except Exception as e:
+        print(f"⚠️ 摘要生成异常: {e}")
+        return ""
         
 async def maybe_consolidate_overview(session_id: str):
     """当 detail 总字数超过 3000 时，自动合并最早的 detail 为 overview"""
@@ -561,84 +639,6 @@ async def maybe_consolidate_overview(session_id: str):
     
     except Exception as e:
         print(f"⚠️ 合并 overview 异常: {e}")
-        
-    # ---- 自动提取时间范围 ----
-    start_dt = None
-    end_dt = None
-    for msg in messages:
-        t = msg.get('created_at')
-        if t:
-            if start_dt is None:
-                start_dt = t
-            end_dt = t
-
-    time_range_line = ""
-    if start_dt and end_dt:
-        def _to_local(dt):
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            local_dt = dt + timedelta(hours=TIMEZONE_HOURS)
-            return local_dt.strftime("%Y-%m-%d %H:%M")
-        start_str = _to_local(start_dt)
-        end_str = _to_local(end_dt)
-        time_range_line = f"本段对话时间范围：{start_str} ~ {end_str}\n\n"
-
-    # ---- 拼接对话文本 ----
-    conversation_text = ""
-    for msg in messages:
-        # 称呼统一：用户 = "小侃"，AI = "Leon"
-        role_label = "小侃" if msg['role'] == 'user' else "Leon"
-        content = msg['content'] if isinstance(msg['content'], str) else str(msg['content'])
-        conversation_text += f"{role_label}: {content}\n\n"
-
-    # ---- 结构化摘要 prompt ----
-    prompt = f"""{time_range_line}请将以下对话压缩成结构化摘要。用第三人称叙述，严格保留情感细节，不要只压缩为事实陈述。
-
-每段摘要必须包含以下固定结构，用 Markdown 格式输出：
-
-- **时间范围**：YYYY-MM-DD HH:MM ~ HH:MM
-- **核心事件**：发生了什么
-- **情感状态**：从以下类别中选择一个或多个——安全感焦虑 / 撒娇调皮 / 真实恐惧或悲伤 / 快乐兴奋 / 亲密依赖 / 冲突不满 / 平静
-- **关键约定**：双方达成的承诺或决定
-
-注意：
-- 称呼统一：用户 = "小侃"，AI = "Leon"，禁止出现"用户""AI""助手"
-- 日期格式统一为 YYYY-MM-DD HH:MM（东八区）
-- 摘要开头必须标注对话的时间范围，如果对话跨天，写出起止日期；如果都在同一天，写出当天的日期和大致的时段
-- 总字数控制在500字以内
----
-{conversation_text}
----
-
-摘要："""
-    
-    try:
-        headers = {
-            "Authorization": f"Bearer {API_KEY}",
-            "Content-Type": "application/json",
-        }
-        if "openrouter" in API_BASE_URL:
-            headers["HTTP-Referer"] = EXTRA_REFERER
-            headers["X-Title"] = EXTRA_TITLE
-        
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(API_BASE_URL, headers=headers, json={
-                "model": CACHE_SUMMARY_MODEL,
-                "max_tokens": 1024,
-                "messages": [{"role": "user", "content": prompt}],
-            })
-            if response.status_code == 200:
-                data = response.json()
-                if "choices" in data:
-                    summary = data["choices"][0]["message"]["content"].strip()
-                    print(f"📝 摘要生成完成: {len(summary)}字 (压缩{len(messages)}条消息)")
-                    return summary
-        
-        print(f"⚠️ 摘要生成失败: HTTP {response.status_code}")
-        return ""
-    except Exception as e:
-        print(f"⚠️ 摘要生成异常: {e}")
-        return ""
 
 
 def group_by_rounds(history: list) -> list:
