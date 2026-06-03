@@ -497,16 +497,31 @@ async def maybe_consolidate_overview(session_id: str):
             data = resp.json()
             text = data["choices"][0]["message"]["content"].strip()
             
+            # 多层容错提取 JSON
+            result = None
             try:
+                # 第一层：直接解析
                 result = json.loads(text)
             except json.JSONDecodeError:
                 import re
-                match = re.search(r'\{.*\}', text, re.DOTALL)
-                if match:
-                    result = json.loads(match.group())
-                else:
-                    print("⚠️ 合并 overview 返回非 JSON")
-                    return
+                # 第二层：提取 ```json ... ``` 代码块
+                code_match = re.search(r'```(?:json)?\s*\n?(\{.*?\})\s*```', text, re.DOTALL)
+                if code_match:
+                    try:
+                        result = json.loads(code_match.group(1))
+                    except json.JSONDecodeError:
+                        pass
+                if result is None:
+                    # 第三层：提取第一个 { ... } 对象
+                    match = re.search(r'\{.*\}', text, re.DOTALL)
+                    if match:
+                        try:
+                            result = json.loads(match.group())
+                        except json.JSONDecodeError:
+                            pass
+            if result is None:
+                print(f"⚠️ 合并 overview 返回非 JSON，原始返回内容：\n{text[:500]}")
+                return
             
             new_overview = result.get("overview", "")
             missing = result.get("missing_memories", [])
