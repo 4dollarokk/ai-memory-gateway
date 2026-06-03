@@ -371,7 +371,66 @@ async def init_tables():
                 END IF;
             END $$;
         """)
-    
+        # ===== 记忆过期时间字段 =====
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memories' AND column_name = 'expires_at'
+                ) THEN
+                    ALTER TABLE memories ADD COLUMN expires_at TIMESTAMPTZ DEFAULT NULL;
+                END IF;
+            END $$;
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_expires
+            ON memories (expires_at) WHERE expires_at IS NOT NULL;
+        """)
+
+        # ===== 摘要分层表（detail + overview） =====
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS summary_entries (
+                id          SERIAL PRIMARY KEY,
+                session_id  TEXT NOT NULL,
+                type        TEXT NOT NULL DEFAULT 'detail',
+                content     TEXT NOT NULL,
+                is_archived BOOLEAN DEFAULT FALSE,
+                char_count  INTEGER DEFAULT 0,
+                created_at  TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_summary_session
+            ON summary_entries (session_id, type, is_archived, created_at);
+        """)
+
+        # ---- 迁移旧的 session_cache_state.summary 到 summary_entries ----
+        try:
+            old_rows = await conn.fetch("""
+                SELECT session_id, summary FROM session_cache_state
+                WHERE summary IS NOT NULL AND summary != ''
+            """)
+            migrated = 0
+            for r in old_rows:
+                try:
+                    import json
+                    parts = json.loads(r['summary'])
+                    if isinstance(parts, list):
+                        for p in parts:
+                            if p and isinstance(p, str):
+                                await conn.execute("""
+                                    INSERT INTO summary_entries (session_id, type, content, char_count, created_at)
+                                    VALUES ($1, 'detail', $2, $3, NOW())
+                                    ON CONFLICT DO NOTHING
+                                """, r['session_id'], p, len(p))
+                                migrated += 1
+                except Exception:
+                    pass
+            if migrated > 0:
+                print(f"🔄 迁移旧摘要: {migrated} 条 → summary_entries")
+        except Exception:
+            pass  # 表可能还不存在
+            
     print("✅ 数据库表结构已就绪")
 
 
@@ -680,12 +739,13 @@ async def update_message_content(message_id: int, new_content: str):
 # ============================================================
 
 async def save_memory(content: str, importance: int = 5, source_session: str = "",
-                      layer: int = 1, emotional_intensity: int = 1, chord: str = ""):
+                      layer: int = 1, emotional_intensity: int = 1, chord: str = "",
+                      expires_at=None):
     pool = await get_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "INSERT INTO memories (content, importance, source_session, layer, emotional_intensity, chord) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
-            content, importance, source_session, layer, emotional_intensity, chord,
+                row = await conn.fetchrow(
+            "INSERT INTO memories (content, importance, source_session, layer, emotional_intensity, chord, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+            content, importance, source_session, layer, emotional_intensity, chord, expires_at,
         )
         
         # MEMORY_VECTOR_ENABLED 时自动计算 embedding
@@ -727,7 +787,7 @@ async def search_memories(query: str, limit: int = 10):
         
         # 至少命中一个关键词（只搜索活跃记忆）
         where_parts = [f"content ILIKE '%' || ${i+1} || '%'" for i in range(len(keywords))]
-        where_clause = f"is_active = TRUE AND ({' OR '.join(where_parts)})"
+        where_clause = f"is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW()) AND ({' OR '.join(where_parts)})"
         
         limit_idx = len(keywords) + 1
         params.append(limit)
@@ -810,7 +870,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
             hit_count_expr = " + ".join(case_parts)
             max_hits = len(keywords)
             where_parts = [f"content ILIKE '%' || ${i+1} || '%'" for i in range(len(keywords))]
-            where_clause = f"is_active = TRUE AND ({' OR '.join(where_parts)})"
+            where_clause = f"is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW()) AND ({' OR '.join(where_parts)})"
             
             limit_idx = len(keywords) + 1
             params.append(limit * 3)
@@ -846,7 +906,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
                     SELECT id, content, importance, created_at, layer, emotional_intensity,
                            1 - (embedding <=> $1::vector) as similarity
                     FROM memories
-                    WHERE embedding IS NOT NULL AND is_active = TRUE
+                    WHERE embedding IS NOT NULL AND is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())
                     ORDER BY embedding <=> $1::vector
                     LIMIT $2
                 """, vec_str, limit * 3)
@@ -855,7 +915,7 @@ async def search_memories_hybrid(query: str, limit: int = 10):
                 import json
                 all_mem = await conn.fetch("""
                     SELECT id, content, importance, created_at, layer, emotional_intensity, embedding_json
-                    FROM memories WHERE embedding_json IS NOT NULL AND is_active = TRUE
+                    FROM memories WHERE embedding_json IS NOT NULL AND is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())
                 """)
                 
                 scored = []
@@ -2002,4 +2062,93 @@ async def get_memory_card(keyword: str) -> dict:
             LIMIT 1
         """, keyword)
         return dict(row) if row else {}
-            
+       # ============================================================
+# 摘要分层：detail 摘要 + overview 总纲
+# ============================================================
+
+async def get_active_summaries(session_id: str) -> dict:
+    """
+    获取当前生效的摘要内容。
+    返回 {'overview': str or None, 'details': [str, ...]}
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        overview_row = await conn.fetchrow("""
+            SELECT content FROM summary_entries
+            WHERE session_id = $1 AND type = 'overview' AND is_archived = FALSE
+            ORDER BY created_at DESC LIMIT 1
+        """, session_id)
+        overview = overview_row['content'] if overview_row else None
+
+        detail_rows = await conn.fetch("""
+            SELECT content FROM summary_entries
+            WHERE session_id = $1 AND type = 'detail' AND is_archived = FALSE
+            ORDER BY created_at ASC
+        """, session_id)
+        details = [r['content'] for r in detail_rows]
+    return {'overview': overview, 'details': details}
+
+
+async def add_detail_summary(session_id: str, content: str):
+    """新增一条 detail 摘要（轮转时生成）"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO summary_entries (session_id, type, content, char_count) "
+            "VALUES ($1, 'detail', $2, $3)",
+            session_id, content, len(content)
+        )
+
+
+async def upsert_overview(session_id: str, content: str):
+    """
+    覆盖更新 overview。使用事务保证原子性。
+    永远只有一条未归档的 overview：先归档旧的，再插入新的。
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("""
+                UPDATE summary_entries SET is_archived = TRUE
+                WHERE session_id = $1 AND type = 'overview' AND is_archived = FALSE
+            """, session_id)
+            await conn.execute(
+                "INSERT INTO summary_entries (session_id, type, content, char_count) "
+                "VALUES ($1, 'overview', $2, $3)",
+                session_id, content, len(content)
+            )
+
+
+async def archive_detail_summaries(session_id: str, detail_ids: list):
+    """归档指定的 detail 摘要（is_archived = TRUE）"""
+    if not detail_ids:
+        return
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE summary_entries SET is_archived = TRUE
+            WHERE session_id = $1 AND id = ANY($2::int[])
+        """, session_id, detail_ids)
+
+
+async def get_oldest_active_details(session_id: str, min_chars: int = 1500) -> list:
+    """
+    取出最早的 active detail，直到累计字数 >= min_chars。
+    返回 [{'id':..., 'content':..., 'char_count':...}]
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, content, char_count FROM summary_entries
+            WHERE session_id = $1 AND type = 'detail' AND is_archived = FALSE
+            ORDER BY created_at ASC
+        """, session_id)
+        selected = []
+        total = 0
+        for r in rows:
+            selected.append(dict(r))
+            total += r['char_count']
+            if total >= min_chars:
+                break
+        return selected 
+
