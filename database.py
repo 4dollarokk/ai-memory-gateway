@@ -743,7 +743,7 @@ async def save_memory(content: str, importance: int = 5, source_session: str = "
                       expires_at=None):
     pool = await get_pool()
     async with pool.acquire() as conn:
-                row = await conn.fetchrow(
+        row = await conn.fetchrow(
             "INSERT INTO memories (content, importance, source_session, layer, emotional_intensity, chord, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
             content, importance, source_session, layer, emotional_intensity, chord, expires_at,
         )
