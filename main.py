@@ -512,8 +512,8 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
         print(f"⚠️ 摘要生成异常: {e}")
         return ""
         
-async def maybe_consolidate_overview(session_id: str):
-    """当 detail 总字数超过 3000 时，自动合并最早的 detail 为 overview"""
+async def maybe_consolidate_overview(session_id: str, force: bool = False):
+    """当 detail 总字数超过 3000 时（或 force=True 时），自动合并最早的 detail 为 overview"""
     if not CACHE_PARTITION_ENABLED:
         return
     
@@ -522,7 +522,7 @@ async def maybe_consolidate_overview(session_id: str):
         details = active['details']
         total_chars = sum(len(d) for d in details)
         
-        if total_chars < 3000:
+        if not force and total_chars < 3000:
             return
         
         to_merge = await _db_module.get_oldest_active_details(session_id, min_chars=1500)
@@ -2619,13 +2619,13 @@ async def api_switch_thread(request: Request):
 
 
 @app.get("/api/partition/consolidate")
-async def api_consolidate_overview():
+async def api_consolidate_overview(force: bool = False):
     """手动触发 overview 合并（立即执行）"""
     active_sid = get_active_session_id()
     if not active_sid:
         return {"error": "未设置活跃对话线"}
     
-    await maybe_consolidate_overview(active_sid)
+    await maybe_consolidate_overview(active_sid, force=force)
     return {"status": "ok", "message": "合并已触发，请查看日志"}
 
 
