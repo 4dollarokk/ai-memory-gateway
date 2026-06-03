@@ -525,7 +525,7 @@ async def maybe_consolidate_overview(session_id: str, force: bool = False):
         if not force and total_chars < 3000:
             return
         
-        to_merge = await _db_module.get_oldest_active_details(session_id, min_chars=1500)
+        to_merge = await _db_module.get_oldest_active_details(session_id, min_chars=1500, min_age_hours=24)
         if not to_merge:
             return
         
@@ -631,6 +631,14 @@ async def maybe_consolidate_overview(session_id: str, force: bool = False):
                     if not dup.get("is_duplicate"):
                         await save_memory(content=fact, importance=5, source_session=session_id)
                         print(f"   📝 补录记忆: {fact[:50]}...")
+
+            # ---- 归档前验证：新 overview 必须有实质增长 ----
+            old_len = len(old_overview or '')
+            new_len = len(new_overview)
+            if new_len <= old_len + 50:
+                print(f"⚠️ 新 overview 未显著增长（旧{old_len}字→新{new_len}字），跳过归档，保留旧 detail")
+                return
+            # -------------------------------------------------
             
             # 成功后归档旧的 detail
             detail_ids = [item['id'] for item in to_merge]
