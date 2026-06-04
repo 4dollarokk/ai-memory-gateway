@@ -1068,32 +1068,59 @@ async def search_memories_hybrid(query: str, limit: int = 10, extra_keywords: li
 
         # 将 candidates 字典转为列表（融合代码要求列表）
         candidates_list = list(candidates.values())
+
+        # 先计算所有候选的初始 score
+        for mid, info in candidates.items():
+            kw = kw_norm.get(mid, 0.0)
+            sem = sem_norm.get(mid, 0.0)
+            imp = info['importance'] / 10.0
+            days = (now - info['created_at']).total_seconds() / 86400.0
+            rec = 1.0 / (1.0 + days)
+
+            layer = info.get('layer', 1) or 1
+            ei = info.get('emotional_intensity', 1) or 1
+            layer_bonus = LAYER_BONUS.get(layer, 1.0)
+            ei_bonus = 1.0 + (ei - 1) * 0.1
+
+            score = (MEMORY_HW_KEYWORD * kw +
+                     MEMORY_HW_SEMANTIC * sem +
+                     MEMORY_HW_IMPORTANCE * imp +
+                     MEMORY_HW_RECENCY * rec) * layer_bonus * ei_bonus
+            
+            candidates[mid]['score'] = score  # ✅ 确保每个候选都有 score
         
         # ---- 精排（Reranker）----
         if RERANKER_ENABLED and len(candidates_list) > limit:
             try:
                 from reranker import rerank as rerank_func
-                candidates = await rerank_func(query, candidates_list, top_k=limit * 2)
-                for c in candidates_list:
-                    c['score'] = c.get('rerank_score', c.get('score', 0))
+                candidates_list = list(candidates.values())
+                reranked = await rerank_func(query, candidates_list, top_k=limit * 2)
+                # 更新 score
+                for c in reranked:
+                    if 'rerank_score' in c:
+                        c['score'] = c['rerank_score']
             except Exception as e:
                 print(f"⚠️  Reranker 精排失败: {e}")
-    
+
         # ---- 情绪天气融合 ----
-        if EMOTION_WEATHER_ENABLED:
+         if EMOTION_WEATHER_ENABLED:
             weather = await compute_emotional_weather(EMOTION_HALF_LIFE_HOURS)
-            for c in candidates_list:
+            for mid, info in candidates.items():
+                if 'score' not in info:  # ✅ 安全检查
+                    info['score'] = 0
                 esim = emotion_similarity(
-                    c.get('valence', 0.0), c.get('arousal', 0.5),
+                    info.get('valence', 0.0), info.get('arousal', 0.5),
                     weather['valence'], weather['arousal']
                 )
-                c['score'] = c['score'] * (1 - EMOTION_WEIGHT) + esim * EMOTION_WEIGHT
+                info['score'] = info['score'] * (1 - EMOTION_WEIGHT) + esim * EMOTION_WEIGHT
     
         # ---- MMR 多样性重排 ----
+        candidates_list = list(candidates.values())
         if MMR_ENABLED and len(candidates_list) > limit:
-            candidates = mmr_rerank(candidates, lambda_param=MMR_LAMBDA, top_k=limit)
+            candidates_list = mmr_rerank(candidates_list, lambda_param=MMR_LAMBDA, top_k=limit)
     
-        # 截断最终结果
+        # 排序并截断
+        candidates_list.sort(key=lambda x: -x.get('score', 0))
         final_results = candidates_list[:limit]
         
         results = final[:limit]
