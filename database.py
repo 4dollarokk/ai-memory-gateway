@@ -143,6 +143,17 @@ async def init_tables():
                 END IF;
             END $$;
         """)
+
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='session_cache_state' AND column_name='last_summarized_round'
+                ) THEN
+                    ALTER TABLE session_cache_state ADD COLUMN last_summarized_round INTEGER DEFAULT 0;
+                END IF;
+            END $$;
+        """)
         
         # content 允许 NULL（工具调用时 assistant 的 content 可能为空）
         await conn.execute("""
@@ -1249,7 +1260,7 @@ async def get_session_cache_state(session_id: str) -> dict:
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT summary, a_start_round, updated_at FROM session_cache_state WHERE session_id = $1",
+            "SELECT summary, a_start_round, last_summarized_round, updated_at FROM session_cache_state WHERE session_id = $1",
             session_id
         )
         if row:
@@ -1268,22 +1279,23 @@ async def get_session_cache_state(session_id: str) -> dict:
             return {
                 'summary_parts': summary_parts,
                 'a_start_round': row['a_start_round'] or 0,
+                'last_summarized_round': row['last_summarized_round'] or 0,  # 新增
                 'updated_at': row['updated_at'],
             }
-        return {'summary_parts': [], 'a_start_round': 0, 'updated_at': None}
+        return {'summary_parts': [], 'a_start_round': 0, 'last_summarized_round': 0, 'updated_at': None}
 
 
-async def save_session_cache_state(session_id: str, summary_parts: list, a_start_round: int):
+async def save_session_cache_state(session_id: str, summary_parts: list, a_start_round: int, last_summarized_round: int = 0):
     import json
     summary_json = json.dumps(summary_parts, ensure_ascii=False)
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO session_cache_state (session_id, summary, a_start_round, updated_at)
-            VALUES ($1, $2, $3, NOW())
+            INSERT INTO session_cache_state (session_id, summary, a_start_round, last_summarized_round, updated_at)
+            VALUES ($1, $2, $3, $4, NOW())
             ON CONFLICT (session_id) 
-            DO UPDATE SET summary = $2, a_start_round = $3, updated_at = NOW()
-        """, session_id, summary_json, a_start_round)
+            DO UPDATE SET summary = $2, a_start_round = $3, last_summarized_round = $4, updated_at = NOW()
+        """, session_id, summary_json, a_start_round, last_summarized_round)
 
 
 # ============================================================
