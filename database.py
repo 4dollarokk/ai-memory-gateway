@@ -10,7 +10,7 @@
 import os
 import re
 from typing import Optional, List
-from datetime import datetime, timedelta, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone
 
 import asyncpg
 
@@ -1765,15 +1765,15 @@ async def import_conversations(records: list):
 
 async def get_fragments_by_date(event_date):
     """获取指定日期的原始碎片（用于每日整理）"""
-    from datetime import timedelta, timezone as dt_timezone
+    from datetime import timedelta, timezone
     
-    local_tz = dt_timezone(timedelta(hours=TIMEZONE_HOURS))
+    local_tz = timezone(timedelta(hours=TIMEZONE_HOURS))
     # 东八区当天 00:00
     start_local = datetime(event_date.year, event_date.month, event_date.day, 0, 0, 0, tzinfo=local_tz)
     end_local = start_local + timedelta(days=1)
     # 转为 UTC
-    start_utc = start_local.astimezone(dt_timezone.utc)
-    end_utc = end_local.astimezone(dt_timezone.utc)
+    start_utc = start_local.astimezone(timezone.utc)
+    end_utc = end_local.astimezone(timezone.utc)
 
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -1789,13 +1789,13 @@ async def get_fragments_by_date(event_date):
 
 async def get_fragments_by_date_range(start_date, end_date):
     """获取指定时间段的原始碎片（用于跨天整理）"""
-    from datetime import timedelta, timezone as dt_timezone
+    from datetime import timedelta, timezone
     
-    local_tz = dt_timezone(timedelta(hours=TIMEZONE_HOURS))
+    local_tz = timezone(timedelta(hours=TIMEZONE_HOURS))
     start_local = datetime(start_date.year, start_date.month, start_date.day, 0, 0, 0, tzinfo=local_tz)
     end_local = datetime(end_date.year, end_date.month, end_date.day, 0, 0, 0, tzinfo=local_tz) + timedelta(days=1)
-    start_utc = start_local.astimezone(dt_timezone.utc)
-    end_utc = end_local.astimezone(dt_timezone.utc)
+    start_utc = start_local.astimezone(timezone.utc)
+    end_utc = end_local.astimezone(timezone.utc)
 
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -2098,8 +2098,8 @@ async def get_diary_by_date(target_date):
         
 async def get_floating_memories(target_date, limit: int = 2):
     """随机获取指定日期的高情感浓度记忆（东八区日期）"""
-    local_tz = dt_timezone(timedelta(hours=TIMEZONE_HOURS))
-    start_utc = datetime(target_date.year, target_date.month, target_date.day, tzinfo=local_tz).astimezone(dt_timezone.utc)
+    local_tz = timezone(timedelta(hours=TIMEZONE_HOURS))
+    start_utc = datetime(target_date.year, target_date.month, target_date.day, tzinfo=local_tz).astimezone(timezone.utc)
     end_utc = start_utc + timedelta(days=1)
 
     pool = await get_pool()
