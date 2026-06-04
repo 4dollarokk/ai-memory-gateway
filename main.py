@@ -274,18 +274,21 @@ templates = Jinja2Templates(directory="templates")
 # 记忆注入
 # ============================================================
 
-async def build_system_prompt_with_memories(user_message: str) -> str:
+async def build_system_prompt_with_memories(user_message: str, base_prompt: str = None) -> str:
     """
     构建带记忆的 system prompt
     1. 用用户消息搜索相关记忆
     2. 格式化成文本拼接到人设后面
     """
     global _last_floating_date
+    if base_prompt is None:
+        base_prompt = await get_system_prompt()
+    
     if not MEMORY_ENABLED or not MEMORY_EXTRACT_ENABLED:
-        return SYSTEM_PROMPT
+        return base_prompt
     
     if MAX_MEMORIES_INJECT <= 0:
-        return SYSTEM_PROMPT
+        return base_prompt
     
     try:
         # ---- 优先检查记忆卡片 ----
@@ -300,7 +303,7 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
             print(f"🃏 命中记忆卡片：{card.get('keyword')}，只推送卡片")
             card_content = card.get('content', '')
             card_block = f"\n\n===== 系统检索到的记忆卡片 =====\n🃏 {card_content}\n===== 卡片结束 =====\n"
-            enhanced_prompt = f"""{SYSTEM_PROMPT}
+            enhanced_prompt = f"""{base_prompt}
 
 {card_block}
 
@@ -379,7 +382,7 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
         memory_text = "\n".join(memory_lines) if memory_lines else "（无相关记忆）"
         memory_block = f"\n\n===== 系统检索到的记忆 =====\n{memory_text}\n===== 记忆结束 =====\n"
 
-        enhanced_prompt = f"""{SYSTEM_PROMPT}
+        enhanced_prompt = f"""{base_prompt}
 
 {memory_block}
 
@@ -404,7 +407,7 @@ async def build_system_prompt_with_memories(user_message: str) -> str:
         
     except Exception as e:
         print(f"⚠️  记忆检索失败: {e}，使用纯人设")
-        return SYSTEM_PROMPT
+        return base_prompt
 
 
 # ============================================================
@@ -1403,19 +1406,21 @@ async def chat_completions(request: Request):
         
         print(f"📦 分区模式: DB历史{len(db_msgs)}条 + 客户端消息{len(client_new_msgs)}条")
         
+        dynamic_prompt = await get_system_prompt()
         messages = await build_partitioned_messages(
-            session_id, all_msgs, SYSTEM_PROMPT, user_message
+            session_id, all_msgs, dynamic_prompt, user_message
         )
         body["messages"] = messages
     
     else:
         # ---------- 原有逻辑：system prompt + 记忆注入 ----------
-        if SYSTEM_PROMPT or (MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message):
+        dynamic_prompt = await get_system_prompt()
+        if dynamic_prompt or (MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message):
             if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
-                enhanced_prompt = await build_system_prompt_with_memories(user_message)
+                enhanced_prompt = await build_system_prompt_with_memories(user_message, base_prompt=dynamic_prompt)
             else:
-                enhanced_prompt = SYSTEM_PROMPT
-            
+                enhanced_prompt = dynamic_prompt
+
             if enhanced_prompt:
                 has_system = any(msg.get("role") == "system" for msg in messages)
                 if has_system:
