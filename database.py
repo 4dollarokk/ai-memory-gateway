@@ -441,6 +441,18 @@ async def init_tables():
         except Exception:
             pass  # 表可能还不存在
 
+        # ===== 分区缓存状态新增 last_summarized_round 字段 =====
+        await conn.execute("""
+            DO $$ BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name='session_cache_state' AND column_name='last_summarized_round'
+                ) THEN
+                    ALTER TABLE session_cache_state ADD COLUMN last_summarized_round INTEGER DEFAULT 0;
+                END IF;
+            END $$;
+        """)
+
         # ===== 新增记忆情绪坐标与真实事件时间 =====
         await conn.execute("""
             DO $$ BEGIN
