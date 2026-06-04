@@ -242,22 +242,22 @@ async def lifespan(app: FastAPI):
     # 启动衰减遗忘定时任务（每天凌晨 3:00 执行）
     import asyncio as _asyncio
     async def _decay_scheduler():
-    """每天凌晨 3:00（东八区）执行一次衰减遗忘"""
-    while True:
-        try:
-            now = datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)
-            # 计算到明天凌晨3:00的秒数
-            tomorrow_3am = (now + timedelta(days=1)).replace(hour=3, minute=0, second=0, microsecond=0)
-            sleep_seconds = (tomorrow_3am - now).total_seconds()
-            if sleep_seconds < 0:
-                sleep_seconds += 86400
-            await asyncio.sleep(sleep_seconds)
-
-            await _db_module.apply_decay_forgetting()
-            print(f"⏰ 衰减遗忘已执行 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        except Exception as e:
-            print(f"❌ 衰减遗忘执行失败: {e}")
-            await asyncio.sleep(3600)  # 出错后等1小时再重试
+        """每天凌晨 3:00（东八区）执行一次衰减遗忘"""
+        while True:
+            try:
+                now = datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)
+                # 计算到明天凌晨3:00的秒数
+                tomorrow_3am = (now + timedelta(days=1)).replace(hour=3, minute=0, second=0, microsecond=0)
+                sleep_seconds = (tomorrow_3am - now).total_seconds()
+                if sleep_seconds < 0:
+                    sleep_seconds += 86400
+                await asyncio.sleep(sleep_seconds)
+    
+                await _db_module.apply_decay_forgetting()
+                print(f"⏰ 衰减遗忘已执行 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            except Exception as e:
+                print(f"❌ 衰减遗忘执行失败: {e}")
+                await asyncio.sleep(3600)  # 出错后等1小时再重试
     
         # 衰减检查日标记：服务启动时，如果今天还没做过衰减，立即执行一次
         if MEMORY_ENABLED:
