@@ -61,10 +61,8 @@ EXTRACTION_PROMPT = """你是信息提取专家，负责从对话中识别并提
     "content": "记忆内容",
     "importance": 分数,
     "layer": 层级数字,
-    "valence": 情感正负（开心还是难过，-1到1）,
-    "arousal": 唤醒度（0 平静，1 非常激动，从0到1）,
+    "emotional_intensity": 情感强度数字,
     "chord": "反映情感基调的和弦进行，如 Am → F → C → G · 72bpm。没有明显情感时可为空字符串"- chord: 反映该记忆情感基调的和弦进行，如 "Am → F → C → G · 72bpm"。只输出和弦，不要解释,
-    "event_time": "2026-06-03T14:30:00+08:00",事件实际发生时间（ISO 8601 东八区），如果对话中明确提到时间请推断，否则 null,
     "expires_at": "过期时间 ISO 8601 格式，如 2026-06-09T23:59:59+08:00。没有明确截止时间则为 null"
   }}
 ]
@@ -179,51 +177,18 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
             try:
                 memories = json.loads(text)
             except json.JSONDecodeError:
+                # 尝试从文本中提取第一个 [...] 结构
                 import re
-                # 方案1：括号匹配法，逐字符找完整JSON数组（支持嵌套和转义）
-                start_idx = text.find('[')
-                if start_idx != -1:
-                    bracket_count = 0
-                    in_string = False
-                    escape = False
-                    for i in range(start_idx, len(text)):
-                        ch = text[i]
-                        if escape:
-                            escape = False
-                            continue
-                        if ch == '\\':
-                            escape = True
-                            continue
-                        if ch == '"':
-                            in_string = not in_string
-                        if not in_string:
-                            if ch == '[':
-                                bracket_count += 1
-                            elif ch == ']':
-                                bracket_count -= 1
-                                if bracket_count == 0:
-                                    candidate = text[start_idx:i+1]
-                                    try:
-                                        memories = json.loads(candidate)
-                                        print("📝 JSON括号匹配提取成功")
-                                        break
-                                    except json.JSONDecodeError:
-                                        continue
-                    else:
-                        # 方案2：贪心正则作为最后兜底
-                        match = re.search(r'\[.*\]', text, re.DOTALL)
-                        if match:
-                            try:
-                                memories = json.loads(match.group())
-                                print("📝 JSON贪心提取成功")
-                            except json.JSONDecodeError as e:
-                                print(f"⚠️  记忆提取结果解析失败: {e}")
-                                return []
-                        else:
-                            print("⚠️  记忆提取结果中未找到JSON数组")
-                            return []
+                match = re.search(r'\[.*\]', text, re.DOTALL)
+                if match:
+                    try:
+                        memories = json.loads(match.group())
+                        print(f"📝 JSON正则兜底提取成功")
+                    except json.JSONDecodeError as e:
+                        print(f"⚠️  记忆提取结果解析失败: {e}")
+                        return []
                 else:
-                    print("⚠️  记忆提取结果中未找到JSON数组")
+                    print(f"⚠️  记忆提取结果中未找到JSON数组")
                     return []
 
             if not isinstance(memories, list):
@@ -242,25 +207,13 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
                             expires_dt = datetime.fromisoformat(expires_str.replace("Z", "+00:00"))
                         except (ValueError, TypeError):
                             print(f"⚠️ 记忆过期时间解析失败: {expires_str}，将忽略")
-
-                    # 解析 event_time
-                    event_str = mem.get("event_time")
-                    event_dt = None
-                    if event_str and isinstance(event_str, str) and event_str.strip():
-                        try:
-                            event_dt = datetime.fromisoformat(event_str.replace("Z", "+00:00"))
-                        except (ValueError, TypeError):
-                            pass
-                  
+                    
                     valid_memories.append({
                         "content": str(mem["content"]),
                         "importance": int(mem.get("importance", 5)),
                         "layer": int(mem.get("layer", 1)),
                         "emotional_intensity": int(mem.get("emotional_intensity", 1)),
                         "chord": str(mem.get("chord", "")),
-                        "valence": float(mem.get("valence", 0.0)),
-                        "arousal": float(mem.get("arousal", 0.5)),
-                        "event_time": event_dt,
                         "expires_at": expires_dt,
                     })
 
