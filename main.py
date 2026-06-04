@@ -209,14 +209,6 @@ async def lifespan(app: FastAPI):
             await ensure_conversation_titles_table()
             count = await get_all_memories_count()
             print(f"✅ 记忆系统已启动，当前记忆数量：{count}")
-    
-    if RERANKER_ENABLED and RERANKER_TYPE == "local":
-    try:
-        from reranker import get_local_reranker
-        get_local_reranker()
-        print("🔥 Reranker 模型已预热")
-    except Exception as e:
-        print(f"⚠️  Reranker 预热失败: {e}")
             
             # 从数据库恢复面板配置（重启后保持Dashboard修改过的值）
             try:
@@ -275,6 +267,13 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"⚠️  数据库初始化失败: {e}")
             print("⚠️  记忆系统将不可用，但网关仍可正常转发")
+        if RERANKER_ENABLED and RERANKER_TYPE == "local":
+            try:
+                from reranker import get_local_reranker
+                get_local_reranker()
+                print("🔥 Reranker 模型已预热")
+            except Exception as e:
+                print(f"⚠️  Reranker 预热失败: {e}")
     else:
         print("ℹ️  记忆系统已关闭（设置 MEMORY_ENABLED=true 开启）")
 
