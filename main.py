@@ -75,7 +75,7 @@ TIMEZONE_HOURS = int(os.getenv("TIMEZONE_HOURS", "8"))
 
 # 轮次计数器
 _round_counter = 0
-_last_floating_date = (datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS) - timedelta(days=1)).strftime("%Y-%m-%d")  # 防止同一天重复浮现
+_last_floating_date = None  # 防止同一天重复浮现
 
 # 强制流式传输（部分客户端不发stream=true导致thinking数据丢失，开启后强制所有请求走流式）
 FORCE_STREAM = os.getenv("FORCE_STREAM", "false").lower() == "true"
@@ -88,41 +88,6 @@ REASONING_EFFORT = os.getenv("REASONING_EFFORT", "")
 EXTRA_REFERER = os.getenv("EXTRA_REFERER", "https://ai-memory-gateway.local")
 EXTRA_TITLE = os.getenv("EXTRA_TITLE", "AI Memory Gateway")
 
-# ============================================================
-# 【新增】前置哨兵
-# ============================================================
-SENTINEL_ENABLED = os.getenv("SENTINEL_ENABLED", "false").lower() == "true"
-SENTINEL_MODEL = os.getenv("SENTINEL_MODEL", "google/gemini-3.1-flash-lite-preview")
-SENTINEL_CONTEXT_ROUNDS = int(os.getenv("SENTINEL_CONTEXT_ROUNDS", "3"))
-
-# ============================================================
-# 【新增】情绪天气
-# ============================================================
-EMOTION_WEATHER_ENABLED = os.getenv("EMOTION_WEATHER_ENABLED", "true").lower() == "true"
-EMOTION_HALF_LIFE_HOURS = int(os.getenv("EMOTION_HALF_LIFE_HOURS", "72"))
-EMOTION_WEIGHT = float(os.getenv("EMOTION_WEIGHT", "0.15"))
-
-# ============================================================
-# 【新增】MMR 多样性重排
-# ============================================================
-MMR_ENABLED = os.getenv("MMR_ENABLED", "true").lower() == "true"
-MMR_LAMBDA = float(os.getenv("MMR_LAMBDA", "0.7"))
-
-# ============================================================
-# 【新增】Reranker 精排
-# ============================================================
-RERANKER_ENABLED = os.getenv("RERANKER_ENABLED", "true").lower() == "true"
-RERANKER_TYPE = os.getenv("RERANKER_TYPE", "local")
-RERANKER_MODEL_NAME = os.getenv("RERANKER_MODEL_NAME", "BAAI/bge-reranker-v2-minicpm-layerwise")
-RERANKER_API_KEY = os.getenv("RERANKER_API_KEY", "")
-RERANKER_API_URL = os.getenv("RERANKER_API_URL", "https://api.cohere.ai/v1/rerank")
-RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "8"))
-
-# ============================================================
-# 【新增】日期背景注入
-# ============================================================
-DATE_CONTEXT_ENABLED = os.getenv("DATE_CONTEXT_ENABLED", "true").lower() == "true"
-DATE_CONTEXT_HIT_THRESHOLD = int(os.getenv("DATE_CONTEXT_HIT_THRESHOLD", "2"))
 
 # ============================================================
 # 人设加载
@@ -267,13 +232,6 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"⚠️  数据库初始化失败: {e}")
             print("⚠️  记忆系统将不可用，但网关仍可正常转发")
-        if RERANKER_ENABLED and RERANKER_TYPE == "local":
-            try:
-                from reranker import get_local_reranker
-                get_local_reranker()
-                print("🔥 Reranker 模型已预热")
-            except Exception as e:
-                print(f"⚠️  Reranker 预热失败: {e}")
     else:
         print("ℹ️  记忆系统已关闭（设置 MEMORY_ENABLED=true 开启）")
 
@@ -284,22 +242,10 @@ async def lifespan(app: FastAPI):
     # 启动衰减遗忘定时任务（每天凌晨 3:00 执行）
     import asyncio as _asyncio
     async def _decay_scheduler():
-        """每天凌晨 3:00（东八区）执行一次衰减遗忘"""
-        while True:
-            try:
-                now = datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)
-                # 计算到明天凌晨3:00的秒数
-                tomorrow_3am = (now + timedelta(days=1)).replace(hour=3, minute=0, second=0, microsecond=0)
-                sleep_seconds = (tomorrow_3am - now).total_seconds()
-                if sleep_seconds < 0:
-                    sleep_seconds += 86400
-                await asyncio.sleep(sleep_seconds)
-    
-                await _db_module.apply_decay_forgetting()
-                print(f"⏰ 衰减遗忘已执行 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-            except Exception as e:
-                print(f"❌ 衰减遗忘执行失败: {e}")
-                await asyncio.sleep(3600)  # 出错后等1小时再重试
+        ...
+    if MEMORY_ENABLED:
+        asyncio.create_task(_decay_scheduler())
+        print("⏰ 衰减遗忘定时任务已启动（每天凌晨 3:00 执行）")
     
         # 衰减检查日标记：服务启动时，如果今天还没做过衰减，立即执行一次
         if MEMORY_ENABLED:
@@ -327,91 +273,6 @@ templates = Jinja2Templates(directory="templates")
 # ============================================================
 # 记忆注入
 # ============================================================
-
-SENTINEL_PROMPT = """你是一个前置哨兵，负责快速提炼当前对话的核心话题。
-根据最近几轮对话，总结出我们在聊什么，并提取 2~3 个关键词（专有名词、核心概念）。
-
-消息记录：
-{conversation}
-
-用 JSON 返回，只输出 JSON：
-{{"topic": "一句话概括话题", "keywords": ["关键词1", "关键词2"]}}"""
-
-async def generate_search_intent(messages: list) -> dict:
-    """用轻量模型总结最近对话，生成检索主题和关键词"""
-    if not SENTINEL_ENABLED:
-        return {"topic": "", "keywords": []}
-
-    tail = messages[-(SENTINEL_CONTEXT_ROUNDS * 2):] if len(messages) > SENTINEL_CONTEXT_ROUNDS * 2 else messages
-    conv_text = "\n".join([f"{m['role']}: {m['content']}" for m in tail if m.get('content')])
-    if not conv_text.strip():
-        return {"topic": "", "keywords": []}
-
-    prompt = SENTINEL_PROMPT.format(conversation=conv_text)
-
-    try:
-        headers = {
-            "Authorization": f"Bearer {API_KEY}",
-            "Content-Type": "application/json",
-        }
-        if "openrouter" in API_BASE_URL:
-            headers["HTTP-Referer"] = EXTRA_REFERER
-            headers["X-Title"] = EXTRA_TITLE
-
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(
-                API_BASE_URL,
-                headers=headers,
-                json={
-                    "model": SENTINEL_MODEL,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0,
-                    "max_tokens": 150,
-                }
-            )
-            if resp.status_code != 200:
-                return {"topic": "", "keywords": []}
-            data = resp.json()
-            text = data["choices"][0]["message"]["content"]
-            import re
-            match = re.search(r'\{.*\}', text, re.DOTALL)
-            if match:
-                return json.loads(match.group())
-    except Exception as e:
-        print(f"⚠️ 哨兵请求失败: {e}")
-    return {"topic": "", "keywords": []}
-
-async def inject_date_context(memories: list, current_date) -> str:
-    """如果某个较早的日期被命中多次，注入当日日记作为背景概况"""
-    if not DATE_CONTEXT_ENABLED:
-        return ""
-    from collections import Counter
-    date_counter = Counter()
-    for mem in memories:
-        dt = mem.get("event_time") or mem.get("created_at")
-        if dt:
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            local_dt = dt.astimezone(timezone(timedelta(hours=TIMEZONE_HOURS)))
-            mem_date = local_dt.date()
-            if mem_date != current_date:
-                date_counter[mem_date] += 1
-
-    important = [d for d, c in date_counter.items() if c >= DATE_CONTEXT_HIT_THRESHOLD]
-    if not important:
-        return ""
-
-    best_date = max(important, key=lambda d: date_counter[d])
-    diary = await _db_module.get_diary_by_date(best_date)
-    if not diary or not diary.get("content"):
-        return ""
-
-    return (
-        f"\n[较早日期的背景概况：{best_date.strftime('%Y-%m-%d')}]\n"
-        f"关键时刻：{diary.get('key_moments', '')}\n"
-        f"情绪：{diary.get('emotional_tone', '')}\n"
-        f"注意：这是较早日期的背景，不代表近期发生。\n"
-    )
 
 async def build_system_prompt_with_memories(user_message: str, base_prompt: str = None) -> str:
     """
@@ -463,21 +324,7 @@ async def build_system_prompt_with_memories(user_message: str, base_prompt: str 
             return enhanced_prompt
 
         # ---- 原有逻辑 ----
-        # 哨兵生成查询（若启用）
-        if SENTINEL_ENABLED and original_messages:
-            intent = await generate_search_intent(original_messages)
-            search_query = intent.get("topic") or user_message
-            extra_kw = intent.get("keywords", [])
-        else:
-            search_query = user_message
-            extra_kw = []
-        
-        # 使用增强的混合搜索（内部已集成精排/MMR/情绪天气）
-        memories = await _db_module.search_memories_hybrid(
-            query=search_query,
-            limit=MAX_MEMORIES_INJECT,
-            extra_keywords=extra_kw
-        )
+        memories = await search_memories(user_message, limit=MAX_MEMORIES_INJECT)
 
         # 浮现记忆
         floating_memories = []
@@ -538,13 +385,6 @@ async def build_system_prompt_with_memories(user_message: str, base_prompt: str 
         enhanced_prompt = f"""{base_prompt}
 
 {memory_block}
-
-# 拼接日期背景
-if DATE_CONTEXT_ENABLED:
-    now_local = datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)
-    date_ctx = await inject_date_context(memories, now_local.date())
-    if date_ctx:
-        memory_block += date_ctx
 
 # 记忆应用
 - 像朋友般自然运用这些记忆，不刻意展示
@@ -880,28 +720,29 @@ def _should_rotate(b_rounds_count: int, X: int, a_msgs: list) -> bool:
 CACHE_MAX_ROTATIONS = int(os.getenv("CACHE_MAX_ROTATIONS", "2"))
 
 
-def _apply_breakpoint(msg: dict) -> dict:
-    """给消息打上 cache_control breakpoint，返回修改后的副本（不修改原对象）"""
-    # 浅拷贝，避免污染原消息
-    msg = dict(msg)
+def _apply_breakpoint(msg: dict) -> bool:
+    """
+    给消息打上 cache_control breakpoint。
+    支持 content 为 str 或 list（多模态block数组）两种格式。
+    返回 True 表示成功打上，False 表示无法打（比如content为空）。
+    """
     content = msg.get('content')
     
     # content 是纯字符串
     if isinstance(content, str) and content.strip():
         msg['content'] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
-        return msg
+        return True
     
     # content 是 block 数组（多模态消息）
     if isinstance(content, list):
-        msg['content'] = list(content)  # 拷贝列表
-        for i in range(len(msg['content']) - 1, -1, -1):
-            block = msg['content'][i]
+        # 从后往前找最后一个 text block
+        for i in range(len(content) - 1, -1, -1):
+            block = content[i]
             if isinstance(block, dict) and block.get("type") == "text" and block.get("text", "").strip():
-                msg['content'][i] = dict(block)  # 拷贝字典
-                msg['content'][i]["cache_control"] = {"type": "ephemeral"}
-                return msg
-        # 如果没找到可打标的位置，也返回拷贝
-    return msg
+                block["cache_control"] = {"type": "ephemeral"}
+                return True
+    
+    return False
 
 
 async def build_partitioned_messages(
@@ -909,7 +750,6 @@ async def build_partitioned_messages(
     all_messages: list,
     base_prompt: str,
     user_message: str,
-    original_messages: list = None,  # 新增
 ) -> list:
     """
     分区缓存模式：构建带breakpoint的messages数组。
@@ -957,7 +797,6 @@ async def build_partitioned_messages(
     state = await get_session_cache_state(session_id)
     summary_parts = state['summary_parts']
     a_start_round = state['a_start_round']
-    last_summarized = state.get('last_summarized_round', 0)   # 取出上次摘要轮次
     
     if total_rounds < X:
         return await _build_basic_cached(history, base_prompt, user_message, current_user_msg)
@@ -977,25 +816,10 @@ async def build_partitioned_messages(
         trigger_info = f"B区{b_rounds_count}轮 >= X={X}" if CACHE_PARTITION_TRIGGER != "time" else f"A区首条消息超出{CACHE_PARTITION_WINDOW}分钟窗口"
         print(f"🔄 轮转#{rotation_count}: session={session_id}, {trigger_info}")
         
-        # ✅ 检查是否已摘要过（通过轮次去重）
-        if a_start_round == last_summarized:
-            print(f"⏭️ A区起始轮次 {a_start_round} 已摘要过，跳过生成")
-        else:
-            new_summary = await generate_summary(a_msgs, session_id)
-            if new_summary:
-                await _db_module.add_detail_summary(session_id, new_summary)
-                summary_parts.append(new_summary)
-                last_summarized = a_start_round  # 记录已摘要的轮次
-                print(f"✅ 摘要已生成: {len(new_summary)} 字")
-    
-        # 滑动窗口
-        a_start_round += X
-        a_end_round = a_start_round + X
-        a_round_groups = rounds[a_start_round : a_end_round]
-        b_round_groups = rounds[a_end_round :]
-        a_msgs = [msg for rnd in a_round_groups for msg in rnd]
-        b_msgs = [msg for rnd in b_round_groups for msg in rnd]
-        b_rounds_count = len(b_round_groups)
+        new_summary = await generate_summary(a_msgs, session_id)
+        if new_summary:
+            await _db_module.add_detail_summary(session_id, new_summary)
+            summary_parts.append(new_summary)
         
         a_start_round += X
         a_end_round = a_start_round + X
@@ -1006,7 +830,7 @@ async def build_partitioned_messages(
         b_rounds_count = len(b_round_groups)
     
     if rotation_count > 0:
-        await save_session_cache_state(session_id, summary_parts, a_start_round, last_summarized)
+        await save_session_cache_state(session_id, summary_parts, a_start_round)
         await maybe_consolidate_overview(session_id)   # 新增：自动合并 detail 为 overview
         summary_total = sum(len(p) for p in summary_parts)
         print(f"🔄 轮转完成(共{rotation_count}次): 摘要{len(summary_parts)}段/{summary_total}字, A区{len(a_msgs)}条, B区{len(b_msgs)}条")
@@ -1069,8 +893,7 @@ async def build_partitioned_messages(
     
     # A区：从末尾往前找第一条非tool消息打BP
     for j in range(len(cleaned_a) - 1, -1, -1):
-        if cleaned_a[j].get('role') != 'tool':
-            cleaned_a[j] = _apply_breakpoint(cleaned_a[j])
+        if cleaned_a[j].get('role') != 'tool' and _apply_breakpoint(cleaned_a[j]):
             break
     
     for m in cleaned_a:
@@ -1079,9 +902,8 @@ async def build_partitioned_messages(
     # B区：先构建去掉created_at的副本，再从末尾往前打BP
     b_cleaned = [{k: v for k, v in msg.items() if k not in ('created_at',)} for msg in b_msgs]
     
-    for j in range(len(cleaned_a) - 1, -1, -1):
-        if cleaned_a[j].get('role') != 'tool':
-            cleaned_a[j] = _apply_breakpoint(cleaned_a[j])
+    for j in range(len(b_cleaned) - 1, -1, -1):
+        if b_cleaned[j].get('role') != 'tool' and _apply_breakpoint(b_cleaned[j]):
             break
     
     for m in b_cleaned:
@@ -1091,7 +913,7 @@ async def build_partitioned_messages(
         parts = [build_time_injection()]
         
         if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
-            mem_text = await build_memory_text(user_message, original_messages)
+            mem_text = await build_memory_text(user_message)
             if mem_text:
                 parts.append(mem_text)
         
@@ -1131,8 +953,7 @@ async def _build_basic_cached(
     
     # 从末尾往前找第一条非tool消息打BP
     for j in range(len(h_cleaned) - 1, -1, -1):
-        if h_cleaned[j].get('role') != 'tool':
-            h_cleaned[j] = _apply_breakpoint(h_cleaned[j])
+        if h_cleaned[j].get('role') != 'tool' and _apply_breakpoint(h_cleaned[j]):
             break
     
     for m in h_cleaned:
@@ -1142,7 +963,7 @@ async def _build_basic_cached(
         parts = [build_time_injection()]
         
         if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
-            mem_text = await build_memory_text(user_message, original_messages)
+            mem_text = await build_memory_text(user_message)
             if mem_text:
                 parts.append(mem_text)
         
@@ -1161,7 +982,7 @@ async def _build_basic_cached(
     return result
 
 
-async def build_memory_text(user_message: str, original_messages: list = None) -> str:
+async def build_memory_text(user_message: str) -> str:
     """搜索记忆并格式化为注入文本（分区缓存模式用）"""
     global _last_floating_date
     if MAX_MEMORIES_INJECT <= 0:
@@ -1181,21 +1002,7 @@ async def build_memory_text(user_message: str, original_messages: list = None) -
             return f"\n\n===== 系统检索到的记忆卡片 =====\n🃏 {card_content}\n===== 卡片结束 =====\n\n"
 
         # ---- 原有逻辑 ----
-        # 哨兵生成查询（若启用）
-        if SENTINEL_ENABLED and original_messages:
-            intent = await generate_search_intent(original_messages)
-            search_query = intent.get("topic") or user_message
-            extra_kw = intent.get("keywords", [])
-        else:
-            search_query = user_message
-            extra_kw = []
-        
-        # 使用混合搜索（内部已集成精排/MMR/情绪天气）
-        memories = await _db_module.search_memories_hybrid(
-            query=search_query,
-            limit=MAX_MEMORIES_INJECT,
-            extra_keywords=extra_kw
-        )
+        memories = await search_memories(user_message, limit=MAX_MEMORIES_INJECT)
         
         # 浮现记忆
         floating_memories = []
@@ -1257,13 +1064,6 @@ async def build_memory_text(user_message: str, original_messages: list = None) -
             memory_lines.append(f"- [今日日记｜{tag_str}] {diary_content}")
 
         memory_block = "\n".join(memory_lines)
-
-        # ---- 拼接日期背景 ----
-        if DATE_CONTEXT_ENABLED:
-            date_ctx = await inject_date_context(memories, now_local.date())
-            if date_ctx:
-                memory_block += date_ctx
-                
         print(f"📚 注入了 {len(memories)} 条记忆" +
               (f" + 浮现 {len(floating_memories)} 条" if floating_memories else "") +
               (" + 今日日记" if diary_content else ""))
@@ -1608,7 +1408,7 @@ async def chat_completions(request: Request):
         
         dynamic_prompt = await get_system_prompt()
         messages = await build_partitioned_messages(
-            session_id, all_msgs, dynamic_prompt, user_message,original_messages=original_messages
+            session_id, all_msgs, dynamic_prompt, user_message
         )
         body["messages"] = messages
     
