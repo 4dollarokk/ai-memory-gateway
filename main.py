@@ -957,6 +957,7 @@ async def build_partitioned_messages(
     state = await get_session_cache_state(session_id)
     summary_parts = state['summary_parts']
     a_start_round = state['a_start_round']
+    last_summarized = state.get('last_summarized_round', 0)   # 取出上次摘要轮次
     
     if total_rounds < X:
         return await _build_basic_cached(history, base_prompt, user_message, current_user_msg)
@@ -976,10 +977,25 @@ async def build_partitioned_messages(
         trigger_info = f"B区{b_rounds_count}轮 >= X={X}" if CACHE_PARTITION_TRIGGER != "time" else f"A区首条消息超出{CACHE_PARTITION_WINDOW}分钟窗口"
         print(f"🔄 轮转#{rotation_count}: session={session_id}, {trigger_info}")
         
+        # ✅ 检查是否已摘要过（通过轮次去重）
+    if a_start_round == last_summarized:
+        print(f"⏭️ A区起始轮次 {a_start_round} 已摘要过，跳过生成")
+    else:
         new_summary = await generate_summary(a_msgs, session_id)
         if new_summary:
             await _db_module.add_detail_summary(session_id, new_summary)
             summary_parts.append(new_summary)
+            last_summarized = a_start_round  # 记录已摘要的轮次
+            print(f"✅ 摘要已生成: {len(new_summary)} 字")
+    
+    # 滑动窗口
+    a_start_round += X
+    a_end_round = a_start_round + X
+    a_round_groups = rounds[a_start_round : a_end_round]
+    b_round_groups = rounds[a_end_round :]
+    a_msgs = [msg for rnd in a_round_groups for msg in rnd]
+    b_msgs = [msg for rnd in b_round_groups for msg in rnd]
+    b_rounds_count = len(b_round_groups)
         
         a_start_round += X
         a_end_round = a_start_round + X
@@ -990,7 +1006,7 @@ async def build_partitioned_messages(
         b_rounds_count = len(b_round_groups)
     
     if rotation_count > 0:
-        await save_session_cache_state(session_id, summary_parts, a_start_round)
+        await save_session_cache_state(session_id, summary_parts, a_start_round, last_summarized)
         await maybe_consolidate_overview(session_id)   # 新增：自动合并 detail 为 overview
         summary_total = sum(len(p) for p in summary_parts)
         print(f"🔄 轮转完成(共{rotation_count}次): 摘要{len(summary_parts)}段/{summary_total}字, A区{len(a_msgs)}条, B区{len(b_msgs)}条")
