@@ -9,21 +9,10 @@
 
 import os
 import re
-import math
 from typing import Optional, List
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 import asyncpg
-
-# ============================================================
-# 精排/情绪/MMR 配置（独立读取，与 main.py 保持一致）
-# ============================================================
-RERANKER_ENABLED = os.getenv("RERANKER_ENABLED", "true").lower() == "true"
-EMOTION_WEATHER_ENABLED = os.getenv("EMOTION_WEATHER_ENABLED", "true").lower() == "true"
-EMOTION_HALF_LIFE_HOURS = int(os.getenv("EMOTION_HALF_LIFE_HOURS", "72"))
-EMOTION_WEIGHT = float(os.getenv("EMOTION_WEIGHT", "0.15"))
-MMR_ENABLED = os.getenv("MMR_ENABLED", "true").lower() == "true"
-MMR_LAMBDA = float(os.getenv("MMR_LAMBDA", "0.7"))
 
 # 时区偏移（和 main.py 保持一致）
 TIMEZONE_HOURS = int(os.getenv("TIMEZONE_HOURS", "8"))
@@ -441,51 +430,7 @@ async def init_tables():
                 print(f"🔄 迁移旧摘要: {migrated} 条 → summary_entries")
         except Exception:
             pass  # 表可能还不存在
-
-        # ===== 分区缓存状态新增 last_summarized_round 字段 =====
-        await conn.execute("""
-            DO $$ BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='session_cache_state' AND column_name='last_summarized_round'
-                ) THEN
-                    ALTER TABLE session_cache_state ADD COLUMN last_summarized_round INTEGER DEFAULT 0;
-                END IF;
-            END $$;
-        """)
-
-        # ===== 新增记忆情绪坐标与真实事件时间 =====
-        await conn.execute("""
-            DO $$ BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='memories' AND column_name='valence'
-                ) THEN
-                    ALTER TABLE memories ADD COLUMN valence FLOAT DEFAULT 0.0;
-                END IF;
-            END $$;
-        """)
-        await conn.execute("""
-            DO $$ BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='memories' AND column_name='arousal'
-                ) THEN
-                    ALTER TABLE memories ADD COLUMN arousal FLOAT DEFAULT 0.5;
-                END IF;
-            END $$;
-        """)
-        await conn.execute("""
-            DO $$ BEGIN
-                IF NOT EXISTS (
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name='memories' AND column_name='event_time'
-                ) THEN
-                    ALTER TABLE memories ADD COLUMN event_time TIMESTAMPTZ DEFAULT NULL;
-                END IF;
-            END $$;
-        """)
-    
+            
     print("✅ 数据库表结构已就绪")
 
 
@@ -624,7 +569,6 @@ async def save_memory_embedding(conn, memory_id: int, embedding: list):
             vec_str, memory_id
         )
     else:
-        # 回退方案：JSON 格式存储
         import json
         await conn.execute(
             "UPDATE memories SET embedding_json = $1 WHERE id = $2",
@@ -712,7 +656,6 @@ async def get_recent_messages(session_id: str, limit: int = 20):
 
 async def search_conversations(query: str, limit: int = 20, offset: int = 0):
     """搜索对话内容，返回匹配的session列表"""
-    original_query = query  # 保存原始查询，避免后续修改
     keywords = extract_search_keywords(query)
     if not keywords:
         return [], 0
@@ -797,17 +740,15 @@ async def update_message_content(message_id: int, new_content: str):
 
 async def save_memory(content: str, importance: int = 5, source_session: str = "",
                       layer: int = 1, emotional_intensity: int = 1, chord: str = "",
-                      expires_at=None, valence: float = 0.0, arousal: float = 0.5,
-                      event_time=None):
+                      expires_at=None):
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            """INSERT INTO memories (content, importance, source_session, layer,
-               emotional_intensity, chord, expires_at, valence, arousal, event_time)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id""",
-            content, importance, source_session, layer,
-            emotional_intensity, chord, expires_at, valence, arousal, event_time
+            "INSERT INTO memories (content, importance, source_session, layer, emotional_intensity, chord, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+            content, importance, source_session, layer, emotional_intensity, chord, expires_at,
         )
+        
+        # MEMORY_VECTOR_ENABLED 时自动计算 embedding
         if MEMORY_VECTOR_ENABLED and row:
             try:
                 embedding = await compute_embedding(content)
@@ -900,7 +841,7 @@ async def search_memories(query: str, limit: int = 10):
         return results
 
 
-async def search_memories_hybrid(query: str, limit: int = 10, extra_keywords: list = None):
+async def search_memories_hybrid(query: str, limit: int = 10):
     """
     记忆混合搜索：关键词 + 向量，归一化后四维加权
     
@@ -909,9 +850,6 @@ async def search_memories_hybrid(query: str, limit: int = 10, extra_keywords: li
     from datetime import datetime, timezone
     
     keywords = extract_search_keywords(query)
-    if extra_keywords:
-        # 合并外部传入的关键词（去重）
-        keywords = list(set(keywords + extra_keywords))
     query_embedding = await compute_embedding(query) if EMBEDDING_API_KEY else []
     
     if not keywords and not query_embedding:
@@ -1065,63 +1003,6 @@ async def search_memories_hybrid(query: str, limit: int = 10, extra_keywords: li
             filtered = before_count - len(final)
         else:
             filtered = 0
-
-        # 将 candidates 字典转为列表（融合代码要求列表）
-        candidates_list = list(candidates.values())
-
-        # 先计算所有候选的初始 score
-        for mid, info in candidates.items():
-            kw = kw_norm.get(mid, 0.0)
-            sem = sem_norm.get(mid, 0.0)
-            imp = info['importance'] / 10.0
-            days = (now - info['created_at']).total_seconds() / 86400.0
-            rec = 1.0 / (1.0 + days)
-
-            layer = info.get('layer', 1) or 1
-            ei = info.get('emotional_intensity', 1) or 1
-            layer_bonus = LAYER_BONUS.get(layer, 1.0)
-            ei_bonus = 1.0 + (ei - 1) * 0.1
-
-            score = (MEMORY_HW_KEYWORD * kw +
-                     MEMORY_HW_SEMANTIC * sem +
-                     MEMORY_HW_IMPORTANCE * imp +
-                     MEMORY_HW_RECENCY * rec) * layer_bonus * ei_bonus
-            
-            candidates[mid]['score'] = score  # ✅ 确保每个候选都有 score
-        
-        # ---- 精排（Reranker）----
-        if RERANKER_ENABLED and len(candidates_list) > limit:
-            try:
-                from reranker import rerank as rerank_func
-                candidates_list = list(candidates.values())
-                reranked = await rerank_func(query, candidates_list, top_k=limit * 2)
-                # 更新 score
-                for c in reranked:
-                    if 'rerank_score' in c:
-                        c['score'] = c['rerank_score']
-            except Exception as e:
-                print(f"⚠️  Reranker 精排失败: {e}")
-
-        # ---- 情绪天气融合 ----
-         if EMOTION_WEATHER_ENABLED:
-            weather = await compute_emotional_weather(EMOTION_HALF_LIFE_HOURS)
-            for mid, info in candidates.items():
-                if 'score' not in info:  # ✅ 安全检查
-                    info['score'] = 0
-                esim = emotion_similarity(
-                    info.get('valence', 0.0), info.get('arousal', 0.5),
-                    weather['valence'], weather['arousal']
-                )
-                info['score'] = info['score'] * (1 - EMOTION_WEIGHT) + esim * EMOTION_WEIGHT
-    
-        # ---- MMR 多样性重排 ----
-        candidates_list = list(candidates.values())
-        if MMR_ENABLED and len(candidates_list) > limit:
-            candidates_list = mmr_rerank(candidates_list, lambda_param=MMR_LAMBDA, top_k=limit)
-    
-        # 排序并截断
-        candidates_list.sort(key=lambda x: -x.get('score', 0))
-        final_results = candidates_list[:limit]
         
         results = final[:limit]
         
@@ -1154,69 +1035,6 @@ async def get_pending_memory_embedding_count():
             return await conn.fetchval(
                 "SELECT COUNT(*) FROM memories WHERE embedding_json IS NULL AND content IS NOT NULL"
             )
-
-async def compute_emotional_weather(half_life_hours: int = 72) -> dict:
-    """基于最近记忆的 valence/arousal，指数衰减加权计算当前情绪天气"""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT valence, arousal, created_at
-            FROM memories
-            WHERE is_active = TRUE
-              AND valence IS NOT NULL
-              AND arousal IS NOT NULL
-              AND created_at > NOW() - INTERVAL '7 days'
-        """)
-    if not rows:
-        return {"valence": 0.0, "arousal": 0.5}
-
-    now = datetime.now(timezone.utc)
-    total_v = total_a = total_w = 0.0
-    for r in rows:
-        ct = r['created_at']
-        if ct.tzinfo is None:
-            ct = ct.replace(tzinfo=timezone.utc)
-        hours = (now - ct).total_seconds() / 3600
-        w = 0.5 ** (hours / half_life_hours)
-        total_v += r['valence'] * w
-        total_a += r['arousal'] * w
-        total_w += w
-    if total_w == 0:
-        return {"valence": 0.0, "arousal": 0.5}
-    return {"valence": total_v / total_w, "arousal": total_a / total_w}
-
-def emotion_similarity(mem_v, mem_a, weather_v, weather_a) -> float:
-    """计算记忆情绪坐标与当前天气的相似度 (0~1)"""
-    dist = math.sqrt((mem_v - weather_v)**2 + (mem_a - weather_a)**2)
-    return 1 - dist / math.sqrt(2)
-
-def mmr_rerank(candidates: list, lambda_param: float = 0.7, top_k: int = 8) -> list:
-    """MMR 多样性重排序，candidates 需包含 'id'、'content'、'score'"""
-    if len(candidates) <= top_k:
-        return candidates
-
-    def _jaccard(a, b):
-        kw1 = set(extract_search_keywords(a['content']))
-        kw2 = set(extract_search_keywords(b['content']))
-        if not kw1 or not kw2:
-            return 0.0
-        return len(kw1 & kw2) / len(kw1 | kw2)
-
-    selected = []
-    remaining = candidates[:]
-    first = max(remaining, key=lambda x: x['score'])
-    selected.append(first)
-    remaining.remove(first)
-
-    while len(selected) < top_k and remaining:
-        mmr_scores = {}
-        for c in remaining:
-            max_sim = max((_jaccard(c, s) for s in selected), default=0)
-            mmr_scores[c['id']] = lambda_param * c['score'] - (1 - lambda_param) * max_sim
-        best = max(remaining, key=lambda x: mmr_scores[x['id']])
-        selected.append(best)
-        remaining.remove(best)
-    return selected
 
 
 async def backfill_memory_embeddings(batch_size: int = 20):
@@ -1431,7 +1249,7 @@ async def get_session_cache_state(session_id: str) -> dict:
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT summary, a_start_round, last_summarized_round, updated_at FROM session_cache_state WHERE session_id = $1",
+            "SELECT summary, a_start_round, updated_at FROM session_cache_state WHERE session_id = $1",
             session_id
         )
         if row:
@@ -1450,23 +1268,22 @@ async def get_session_cache_state(session_id: str) -> dict:
             return {
                 'summary_parts': summary_parts,
                 'a_start_round': row['a_start_round'] or 0,
-                'last_summarized_round': row['last_summarized_round'] or 0,  # 新增
                 'updated_at': row['updated_at'],
             }
-        return {'summary_parts': [], 'a_start_round': 0, 'last_summarized_round': 0, 'updated_at': None}
+        return {'summary_parts': [], 'a_start_round': 0, 'updated_at': None}
 
 
-async def save_session_cache_state(session_id: str, summary_parts: list, a_start_round: int, last_summarized_round: int = 0):
+async def save_session_cache_state(session_id: str, summary_parts: list, a_start_round: int):
     import json
     summary_json = json.dumps(summary_parts, ensure_ascii=False)
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO session_cache_state (session_id, summary, a_start_round, last_summarized_round, updated_at)
-            VALUES ($1, $2, $3, $4, NOW())
+            INSERT INTO session_cache_state (session_id, summary, a_start_round, updated_at)
+            VALUES ($1, $2, $3, NOW())
             ON CONFLICT (session_id) 
-            DO UPDATE SET summary = $2, a_start_round = $3, last_summarized_round = $4, updated_at = NOW()
-        """, session_id, summary_json, a_start_round, last_summarized_round)
+            DO UPDATE SET summary = $2, a_start_round = $3, updated_at = NOW()
+        """, session_id, summary_json, a_start_round)
 
 
 # ============================================================
@@ -1793,16 +1610,11 @@ async def import_conversations(records: list):
 
 async def get_fragments_by_date(event_date):
     """获取指定日期的原始碎片（用于每日整理）"""
-    from datetime import timedelta, timezone
+    # 把本地日期转成UTC时间范围，避免DATE()用UTC截断导致日期偏移
+    local_tz = dt_timezone(timedelta(hours=TIMEZONE_HOURS))
+    start_utc = datetime(event_date.year, event_date.month, event_date.day, tzinfo=local_tz).astimezone(dt_timezone.utc)
+    end_utc = start_utc + timedelta(days=1)
     
-    local_tz = timezone(timedelta(hours=TIMEZONE_HOURS))
-    # 东八区当天 00:00
-    start_local = datetime(event_date.year, event_date.month, event_date.day, 0, 0, 0, tzinfo=local_tz)
-    end_local = start_local + timedelta(days=1)
-    # 转为 UTC
-    start_utc = start_local.astimezone(timezone.utc)
-    end_utc = end_local.astimezone(timezone.utc)
-
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -1817,14 +1629,12 @@ async def get_fragments_by_date(event_date):
 
 async def get_fragments_by_date_range(start_date, end_date):
     """获取指定时间段的原始碎片（用于跨天整理）"""
-    from datetime import timedelta, timezone
+    # 把本地日期转成UTC时间范围，避免DATE()用UTC截断导致日期偏移
+    local_tz = dt_timezone(timedelta(hours=TIMEZONE_HOURS))
+    start_utc = datetime(start_date.year, start_date.month, start_date.day, tzinfo=local_tz).astimezone(dt_timezone.utc)
+    # end_date 当天结束 = end_date 下一天的 00:00
+    end_utc = datetime(end_date.year, end_date.month, end_date.day, tzinfo=local_tz).astimezone(dt_timezone.utc) + timedelta(days=1)
     
-    local_tz = timezone(timedelta(hours=TIMEZONE_HOURS))
-    start_local = datetime(start_date.year, start_date.month, start_date.day, 0, 0, 0, tzinfo=local_tz)
-    end_local = datetime(end_date.year, end_date.month, end_date.day, 0, 0, 0, tzinfo=local_tz) + timedelta(days=1)
-    start_utc = start_local.astimezone(timezone.utc)
-    end_utc = end_local.astimezone(timezone.utc)
-
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -1838,25 +1648,17 @@ async def get_fragments_by_date_range(start_date, end_date):
 
 
 async def create_event_memory(title: str, content: str, importance: int, 
-                               event_date, merged_from: list,
-                               valence=0.0, arousal=0.5, event_time=None):
+                               event_date, merged_from: list):
     """创建事件记忆（从碎片合并而来）"""
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO memories (content, importance, layer, title, is_active, merged_from, event_date, valence, arousal, event_time)
-            VALUES ($1, $2, 2, $3, TRUE, $4, $5,$6,$7,$8)
+            INSERT INTO memories (content, importance, layer, title, is_active, merged_from, event_date)
+            VALUES ($1, $2, 2, $3, TRUE, $4, $5)
             RETURNING id
-        """, content, importance, title, merged_from, event_date, valence, arousal, event_time)
+        """, content, importance, title, merged_from, event_date)
+        
         new_id = row['id'] if row else None
-        if MEMORY_VECTOR_ENABLED and new_id:
-            try:
-                embedding = await compute_embedding(content)
-                if embedding:
-                    await save_memory_embedding(conn, new_id, embedding)
-            except Exception as e:
-                print(f"⚠️ 事件记忆embedding计算失败（id={new_id}）: {e}")
-        return new_id
         
         # 向量搜索：计算并保存 embedding
         if MEMORY_VECTOR_ENABLED and new_id:
@@ -1899,7 +1701,7 @@ async def promote_to_core(memory_id: int, title: str = None):
 
 
 async def merge_memories(memory_ids: list, new_title: str, new_content: str, 
-                         importance: int, layer: int = 2, valence=0.0, arousal=0.5, event_time=None):
+                         importance: int, layer: int = 2):
     """合并多条记忆为一条新记忆"""
     if not memory_ids:
         return None
@@ -1915,10 +1717,10 @@ async def merge_memories(memory_ids: list, new_title: str, new_content: str,
         
         # 创建新记忆
         row = await conn.fetchrow("""
-            INSERT INTO memories (content, importance, layer, title, is_active, merged_from, event_date, valence, arousal, event_time)
-            VALUES ($1, $2, $3, $4, TRUE, $5, $6,$7,$8,$9)
+            INSERT INTO memories (content, importance, layer, title, is_active, merged_from, event_date)
+            VALUES ($1, $2, $3, $4, TRUE, $5, $6)
             RETURNING id
-        """, new_content, importance, layer, new_title, memory_ids, event_date, valence, arousal, event_time)
+        """, new_content, importance, layer, new_title, memory_ids, event_date)
         
         new_id = row['id'] if row else None
         
@@ -2113,21 +1915,11 @@ async def get_today_diary() -> dict:
                 "key_moments": row["key_moments"] or "",
             }
         return {}
-
-async def get_diary_by_date(target_date):
-    """获取指定日期的日记"""
-    pool = await get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT content, key_moments, emotional_tone FROM diary WHERE date = $1 ORDER BY window_id DESC LIMIT 1",
-            target_date
-        )
-        return dict(row) if row else {}
         
 async def get_floating_memories(target_date, limit: int = 2):
     """随机获取指定日期的高情感浓度记忆（东八区日期）"""
-    local_tz = timezone(timedelta(hours=TIMEZONE_HOURS))
-    start_utc = datetime(target_date.year, target_date.month, target_date.day, tzinfo=local_tz).astimezone(timezone.utc)
+    local_tz = dt_timezone(timedelta(hours=TIMEZONE_HOURS))
+    start_utc = datetime(target_date.year, target_date.month, target_date.day, tzinfo=local_tz).astimezone(dt_timezone.utc)
     end_utc = start_utc + timedelta(days=1)
 
     pool = await get_pool()
@@ -2362,4 +2154,3 @@ async def get_oldest_active_details(session_id: str, min_chars: int = 1500, min_
             if total >= min_chars:
                 break
         return selected 
-
