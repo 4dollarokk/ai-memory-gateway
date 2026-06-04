@@ -151,7 +151,7 @@ async def refresh_system_prompt_periodically():
     """每5分钟刷新一次 system prompt 缓存"""
     while True:
        try:
-            await asyncio.sleep(10)  # 300秒 = 5分钟，可以改成 60 提高实时性
+            await asyncio.sleep(300)  # 300秒 = 5分钟，可以改成 60 提高实时性
             invalidate_system_prompt_cache()
             print(f"🔄 System Prompt 缓存已清除 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
        except Exception as e:
