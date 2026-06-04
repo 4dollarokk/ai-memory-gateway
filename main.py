@@ -978,24 +978,24 @@ async def build_partitioned_messages(
         print(f"🔄 轮转#{rotation_count}: session={session_id}, {trigger_info}")
         
         # ✅ 检查是否已摘要过（通过轮次去重）
-    if a_start_round == last_summarized:
-        print(f"⏭️ A区起始轮次 {a_start_round} 已摘要过，跳过生成")
-    else:
-        new_summary = await generate_summary(a_msgs, session_id)
-        if new_summary:
-            await _db_module.add_detail_summary(session_id, new_summary)
-            summary_parts.append(new_summary)
-            last_summarized = a_start_round  # 记录已摘要的轮次
-            print(f"✅ 摘要已生成: {len(new_summary)} 字")
+        if a_start_round == last_summarized:
+            print(f"⏭️ A区起始轮次 {a_start_round} 已摘要过，跳过生成")
+        else:
+            new_summary = await generate_summary(a_msgs, session_id)
+            if new_summary:
+                await _db_module.add_detail_summary(session_id, new_summary)
+                summary_parts.append(new_summary)
+                last_summarized = a_start_round  # 记录已摘要的轮次
+                print(f"✅ 摘要已生成: {len(new_summary)} 字")
     
-    # 滑动窗口
-    a_start_round += X
-    a_end_round = a_start_round + X
-    a_round_groups = rounds[a_start_round : a_end_round]
-    b_round_groups = rounds[a_end_round :]
-    a_msgs = [msg for rnd in a_round_groups for msg in rnd]
-    b_msgs = [msg for rnd in b_round_groups for msg in rnd]
-    b_rounds_count = len(b_round_groups)
+        # 滑动窗口
+        a_start_round += X
+        a_end_round = a_start_round + X
+        a_round_groups = rounds[a_start_round : a_end_round]
+        b_round_groups = rounds[a_end_round :]
+        a_msgs = [msg for rnd in a_round_groups for msg in rnd]
+        b_msgs = [msg for rnd in b_round_groups for msg in rnd]
+        b_rounds_count = len(b_round_groups)
         
         a_start_round += X
         a_end_round = a_start_round + X
