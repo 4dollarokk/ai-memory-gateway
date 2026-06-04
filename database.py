@@ -883,7 +883,7 @@ async def search_memories(query: str, limit: int = 10):
         return results
 
 
-async def search_memories_hybrid(query: str, limit: int = 10):
+async def search_memories_hybrid(query: str, limit: int = 10, extra_keywords: list = None):
     """
     记忆混合搜索：关键词 + 向量，归一化后四维加权
     
@@ -892,6 +892,9 @@ async def search_memories_hybrid(query: str, limit: int = 10):
     from datetime import datetime, timezone
     
     keywords = extract_search_keywords(query)
+    if extra_keywords:
+        # 合并外部传入的关键词（去重）
+        keywords = list(set(keywords + extra_keywords))
     query_embedding = await compute_embedding(query) if EMBEDDING_API_KEY else []
     
     if not keywords and not query_embedding:
