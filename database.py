@@ -563,17 +563,14 @@ async def save_memory_embedding(conn, memory_id: int, embedding: list):
         return
     
     if HAS_PGVECTOR:
-        vec_str = '[' + ','.join(str(f) for f in embedding) + ']'
-        await conn.execute(
-            "UPDATE memories SET embedding = $1::vector WHERE id = $2",
-            vec_str, memory_id
-        )
-    else:
-        import json
-        await conn.execute(
-            "UPDATE memories SET embedding_json = $1 WHERE id = $2",
-            json.dumps(embedding), memory_id
-        )
+        sem_rows = await conn.fetch("""
+            SELECT id, content, importance, created_at, layer, emotional_intensity,
+                   1 - (embedding <=> $1::vector) as similarity
+            FROM memories
+            WHERE embedding IS NOT NULL AND is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())
+            ORDER BY embedding <=> $1::vector
+            LIMIT $2
+        """, query_embedding, limit * 3)  # 直接传列表，asyncpg 自动转换
 
 
 def _cosine_sim(a, b):
@@ -1610,11 +1607,16 @@ async def import_conversations(records: list):
 
 async def get_fragments_by_date(event_date):
     """获取指定日期的原始碎片（用于每日整理）"""
-    # 把本地日期转成UTC时间范围，避免DATE()用UTC截断导致日期偏移
-    local_tz = dt_timezone(timedelta(hours=TIMEZONE_HOURS))
-    start_utc = datetime(event_date.year, event_date.month, event_date.day, tzinfo=local_tz).astimezone(dt_timezone.utc)
-    end_utc = start_utc + timedelta(days=1)
+    from datetime import timedelta, timezone as dt_timezone
     
+    local_tz = dt_timezone(timedelta(hours=TIMEZONE_HOURS))
+    # 东八区当天 00:00
+    start_local = datetime(event_date.year, event_date.month, event_date.day, 0, 0, 0, tzinfo=local_tz)
+    end_local = start_local + timedelta(days=1)
+    # 转为 UTC
+    start_utc = start_local.astimezone(dt_timezone.utc)
+    end_utc = end_local.astimezone(dt_timezone.utc)
+
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -1629,12 +1631,14 @@ async def get_fragments_by_date(event_date):
 
 async def get_fragments_by_date_range(start_date, end_date):
     """获取指定时间段的原始碎片（用于跨天整理）"""
-    # 把本地日期转成UTC时间范围，避免DATE()用UTC截断导致日期偏移
-    local_tz = dt_timezone(timedelta(hours=TIMEZONE_HOURS))
-    start_utc = datetime(start_date.year, start_date.month, start_date.day, tzinfo=local_tz).astimezone(dt_timezone.utc)
-    # end_date 当天结束 = end_date 下一天的 00:00
-    end_utc = datetime(end_date.year, end_date.month, end_date.day, tzinfo=local_tz).astimezone(dt_timezone.utc) + timedelta(days=1)
+    from datetime import timedelta, timezone as dt_timezone
     
+    local_tz = dt_timezone(timedelta(hours=TIMEZONE_HOURS))
+    start_local = datetime(start_date.year, start_date.month, start_date.day, 0, 0, 0, tzinfo=local_tz)
+    end_local = datetime(end_date.year, end_date.month, end_date.day, 0, 0, 0, tzinfo=local_tz) + timedelta(days=1)
+    start_utc = start_local.astimezone(dt_timezone.utc)
+    end_utc = end_local.astimezone(dt_timezone.utc)
+
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
