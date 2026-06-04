@@ -1464,6 +1464,18 @@ async def chat_completions(request: Request):
         body.pop("google", None)
         body["reasoning_effort"] = REASONING_EFFORT
         print(f"🧠 注入推理参数: reasoning_effort={REASONING_EFFORT}")
+
+    # ---------- 打印实际注入的 system prompt ----------
+    for msg in body.get("messages", []):
+        if msg.get("role") == "system":
+            content = msg.get("content", "")
+            # 如果是列表（多 block），取出文本部分拼接
+            if isinstance(content, list):
+                text_blocks = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("text")]
+                content = " ".join(text_blocks)
+            preview = content[:200] + "..." if len(content) > 200 else content
+            print(f"📝 注入的 System Prompt（{len(content)} 字）：{preview}")
+            break
     
     print(f"📡 请求: model={model}, stream={is_stream}, memory={'on' if MEMORY_ENABLED else 'off'}", flush=True)
     
