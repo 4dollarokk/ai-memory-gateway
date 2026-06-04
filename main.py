@@ -1592,8 +1592,7 @@ async def chat_completions(request: Request):
         
         dynamic_prompt = await get_system_prompt()
         messages = await build_partitioned_messages(
-            session_id, all_msgs, dynamic_prompt, user_message
-            original_messages=original_messages
+            session_id, all_msgs, dynamic_prompt, user_message,original_messages=original_messages
         )
         body["messages"] = messages
     
