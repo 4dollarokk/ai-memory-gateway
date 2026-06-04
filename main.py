@@ -143,6 +143,16 @@ def invalidate_system_prompt_cache():
     global _cached_system_prompt, _cached_system_prompt_loaded
     _cached_system_prompt = None
     _cached_system_prompt_loaded = False
+# ============================================================
+# 【新增】定时刷新 System Prompt 缓存
+# ============================================================
+
+async def refresh_system_prompt_periodically():
+    """每5分钟刷新一次 system prompt 缓存"""
+    while True:
+        await asyncio.sleep(300)  # 300秒 = 5分钟，可以改成 60 提高实时性
+        invalidate_system_prompt_cache()
+        print(f"🔄 System Prompt 缓存已清除 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 
 # ============================================================
@@ -220,7 +230,11 @@ async def lifespan(app: FastAPI):
             print("⚠️  记忆系统将不可用，但网关仍可正常转发")
     else:
         print("ℹ️  记忆系统已关闭（设置 MEMORY_ENABLED=true 开启）")
-        
+
+    # 启动 System Prompt 定时刷新（每5分钟）
+    asyncio.create_task(refresh_system_prompt_periodically())
+    print("🔄 System Prompt 定时刷新已启动（每5分钟）")
+    
     # 启动衰减遗忘定时任务（每天凌晨 3:00 执行）
     import asyncio as _asyncio
     async def _decay_scheduler():
