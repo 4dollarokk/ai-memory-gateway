@@ -177,18 +177,51 @@ async def extract_memories(messages: List[Dict[str, str]], existing_memories: Li
             try:
                 memories = json.loads(text)
             except json.JSONDecodeError:
-                # 尝试从文本中提取第一个 [...] 结构
                 import re
-                match = re.search(r'\[.*\]', text, re.DOTALL)
-                if match:
-                    try:
-                        memories = json.loads(match.group())
-                        print(f"📝 JSON正则兜底提取成功")
-                    except json.JSONDecodeError as e:
-                        print(f"⚠️  记忆提取结果解析失败: {e}")
-                        return []
+                # 方案1：括号匹配法，逐字符找完整JSON数组（支持嵌套和转义）
+                start_idx = text.find('[')
+                if start_idx != -1:
+                    bracket_count = 0
+                    in_string = False
+                    escape = False
+                    for i in range(start_idx, len(text)):
+                        ch = text[i]
+                        if escape:
+                            escape = False
+                            continue
+                        if ch == '\\':
+                            escape = True
+                            continue
+                        if ch == '"':
+                            in_string = not in_string
+                        if not in_string:
+                            if ch == '[':
+                                bracket_count += 1
+                            elif ch == ']':
+                                bracket_count -= 1
+                                if bracket_count == 0:
+                                    candidate = text[start_idx:i+1]
+                                    try:
+                                        memories = json.loads(candidate)
+                                        print("📝 JSON括号匹配提取成功")
+                                        break
+                                    except json.JSONDecodeError:
+                                        continue
+                    else:
+                        # 方案2：贪心正则作为最后兜底
+                        match = re.search(r'\[.*\]', text, re.DOTALL)
+                        if match:
+                            try:
+                                memories = json.loads(match.group())
+                                print("📝 JSON贪心提取成功")
+                            except json.JSONDecodeError as e:
+                                print(f"⚠️  记忆提取结果解析失败: {e}")
+                                return []
+                        else:
+                            print("⚠️  记忆提取结果中未找到JSON数组")
+                            return []
                 else:
-                    print(f"⚠️  记忆提取结果中未找到JSON数组")
+                    print("⚠️  记忆提取结果中未找到JSON数组")
                     return []
 
             if not isinstance(memories, list):
