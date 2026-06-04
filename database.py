@@ -617,6 +617,7 @@ async def save_memory_embedding(conn, memory_id: int, embedding: list):
         return
     
     if HAS_PGVECTOR:
+        vec_str = '[' + ','.join(str(f) for f in query_embedding) + ']'
         sem_rows = await conn.fetch("""
             SELECT id, content, importance, created_at, layer, emotional_intensity,
                    1 - (embedding <=> $1::vector) as similarity
@@ -624,7 +625,7 @@ async def save_memory_embedding(conn, memory_id: int, embedding: list):
             WHERE embedding IS NOT NULL AND is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())
             ORDER BY embedding <=> $1::vector
             LIMIT $2
-        """, query_embedding, limit * 3)  # 直接传列表，asyncpg 自动转换
+        """, vec_str, limit * 3)  # 直接传列表，asyncpg 自动转换
 
 
 def _cosine_sim(a, b):
