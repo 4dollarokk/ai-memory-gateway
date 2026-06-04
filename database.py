@@ -617,15 +617,18 @@ async def save_memory_embedding(conn, memory_id: int, embedding: list):
         return
     
     if HAS_PGVECTOR:
-        vec_str = '[' + ','.join(str(f) for f in query_embedding) + ']'
-        sem_rows = await conn.fetch("""
-            SELECT id, content, importance, created_at, layer, emotional_intensity,
-                   1 - (embedding <=> $1::vector) as similarity
-            FROM memories
-            WHERE embedding IS NOT NULL AND is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())
-            ORDER BY embedding <=> $1::vector
-            LIMIT $2
-        """, vec_str, limit * 3)  # 直接传列表，asyncpg 自动转换
+        vec_str = '[' + ','.join(str(f) for f in embedding) + ']'
+        await conn.execute(
+            "UPDATE memories SET embedding = $1::vector WHERE id = $2",
+            vec_str, memory_id
+        )
+    else:
+        # 回退方案：JSON 格式存储
+        import json
+        await conn.execute(
+            "UPDATE memories SET embedding_json = $1 WHERE id = $2",
+            json.dumps(embedding), memory_id
+        )
 
 
 def _cosine_sim(a, b):
@@ -959,6 +962,7 @@ async def search_memories_hybrid(query: str, limit: int = 10, extra_keywords: li
         # ---- 向量路 ----
         if query_embedding:
             if HAS_PGVECTOR:
+                vec_str = '[' + ','.join(str(f) for f in query_embedding) + ']'
                 sem_rows = await conn.fetch("""
                     SELECT id, content, importance, created_at, layer, emotional_intensity,
                            1 - (embedding <=> $1::vector) as similarity
@@ -966,7 +970,7 @@ async def search_memories_hybrid(query: str, limit: int = 10, extra_keywords: li
                     WHERE embedding IS NOT NULL AND is_active = TRUE AND (expires_at IS NULL OR expires_at > NOW())
                     ORDER BY embedding <=> $1::vector
                     LIMIT $2
-                """, query_embedding, limit * 3)
+                """, vec_str, limit * 3)
             else:
                 # Python端计算cosine
                 import json
