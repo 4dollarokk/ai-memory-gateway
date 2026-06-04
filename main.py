@@ -242,10 +242,22 @@ async def lifespan(app: FastAPI):
     # 启动衰减遗忘定时任务（每天凌晨 3:00 执行）
     import asyncio as _asyncio
     async def _decay_scheduler():
-        ...
-    if MEMORY_ENABLED:
-        asyncio.create_task(_decay_scheduler())
-        print("⏰ 衰减遗忘定时任务已启动（每天凌晨 3:00 执行）")
+    """每天凌晨 3:00（东八区）执行一次衰减遗忘"""
+    while True:
+        try:
+            now = datetime.now(timezone.utc) + timedelta(hours=TIMEZONE_HOURS)
+            # 计算到明天凌晨3:00的秒数
+            tomorrow_3am = (now + timedelta(days=1)).replace(hour=3, minute=0, second=0, microsecond=0)
+            sleep_seconds = (tomorrow_3am - now).total_seconds()
+            if sleep_seconds < 0:
+                sleep_seconds += 86400
+            await asyncio.sleep(sleep_seconds)
+
+            await _db_module.apply_decay_forgetting()
+            print(f"⏰ 衰减遗忘已执行 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        except Exception as e:
+            print(f"❌ 衰减遗忘执行失败: {e}")
+            await asyncio.sleep(3600)  # 出错后等1小时再重试
     
         # 衰减检查日标记：服务启动时，如果今天还没做过衰减，立即执行一次
         if MEMORY_ENABLED:
@@ -720,29 +732,28 @@ def _should_rotate(b_rounds_count: int, X: int, a_msgs: list) -> bool:
 CACHE_MAX_ROTATIONS = int(os.getenv("CACHE_MAX_ROTATIONS", "2"))
 
 
-def _apply_breakpoint(msg: dict) -> bool:
-    """
-    给消息打上 cache_control breakpoint。
-    支持 content 为 str 或 list（多模态block数组）两种格式。
-    返回 True 表示成功打上，False 表示无法打（比如content为空）。
-    """
+def _apply_breakpoint(msg: dict) -> dict:
+    """给消息打上 cache_control breakpoint，返回修改后的副本（不修改原对象）"""
+    # 浅拷贝，避免污染原消息
+    msg = dict(msg)
     content = msg.get('content')
     
     # content 是纯字符串
     if isinstance(content, str) and content.strip():
         msg['content'] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
-        return True
+        return msg
     
     # content 是 block 数组（多模态消息）
     if isinstance(content, list):
-        # 从后往前找最后一个 text block
-        for i in range(len(content) - 1, -1, -1):
-            block = content[i]
+        msg['content'] = list(content)  # 拷贝列表
+        for i in range(len(msg['content']) - 1, -1, -1):
+            block = msg['content'][i]
             if isinstance(block, dict) and block.get("type") == "text" and block.get("text", "").strip():
-                block["cache_control"] = {"type": "ephemeral"}
-                return True
-    
-    return False
+                msg['content'][i] = dict(block)  # 拷贝字典
+                msg['content'][i]["cache_control"] = {"type": "ephemeral"}
+                return msg
+        # 如果没找到可打标的位置，也返回拷贝
+    return msg
 
 
 async def build_partitioned_messages(
@@ -893,7 +904,8 @@ async def build_partitioned_messages(
     
     # A区：从末尾往前找第一条非tool消息打BP
     for j in range(len(cleaned_a) - 1, -1, -1):
-        if cleaned_a[j].get('role') != 'tool' and _apply_breakpoint(cleaned_a[j]):
+        if cleaned_a[j].get('role') != 'tool':
+            cleaned_a[j] = _apply_breakpoint(cleaned_a[j])
             break
     
     for m in cleaned_a:
@@ -902,8 +914,9 @@ async def build_partitioned_messages(
     # B区：先构建去掉created_at的副本，再从末尾往前打BP
     b_cleaned = [{k: v for k, v in msg.items() if k not in ('created_at',)} for msg in b_msgs]
     
-    for j in range(len(b_cleaned) - 1, -1, -1):
-        if b_cleaned[j].get('role') != 'tool' and _apply_breakpoint(b_cleaned[j]):
+    for j in range(len(cleaned_a) - 1, -1, -1):
+        if cleaned_a[j].get('role') != 'tool':
+            cleaned_a[j] = _apply_breakpoint(cleaned_a[j])
             break
     
     for m in b_cleaned:
@@ -953,7 +966,8 @@ async def _build_basic_cached(
     
     # 从末尾往前找第一条非tool消息打BP
     for j in range(len(h_cleaned) - 1, -1, -1):
-        if h_cleaned[j].get('role') != 'tool' and _apply_breakpoint(h_cleaned[j]):
+        if h_cleaned[j].get('role') != 'tool':
+            h_cleaned[j] = _apply_breakpoint(h_cleaned[j])
             break
     
     for m in h_cleaned:
